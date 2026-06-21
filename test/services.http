@@ -1,0 +1,32 @@
+@baseUrl = http://localhost:3000
+@api = {{baseUrl}}/api
+@id = 1
+
+### LIST
+GET {{api}}/services
+
+### CREATE
+POST {{api}}/services
+Content-Type: application/json
+
+{
+  "business_id": 1,
+  "name": "Saç Kesim",
+  "duration_minutes": 30,
+  "price": 30000,
+  "is_active": 1
+}
+
+### GET
+GET {{api}}/services/{{id}}
+
+### UPDATE
+PUT {{api}}/services/{{id}}
+Content-Type: application/json
+
+{
+  "price": 35000
+}
+
+### DELETE
+DELETE {{api}}/services/{{id}}

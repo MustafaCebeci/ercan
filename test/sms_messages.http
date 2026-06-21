@@ -1,0 +1,36 @@
+@baseUrl = http://localhost:3000
+@api = {{baseUrl}}/api
+@id = 1
+
+### LIST
+GET {{api}}/sms_messages
+
+### CREATE
+POST {{api}}/sms_messages
+Content-Type: application/json
+
+{
+  "business_id": 1,
+  "appointment_id": 1,
+  "to_phone": "05000000003",
+  "type": "reminder",
+  "body": "Randevunuz yaklaşıyor",
+  "provider": "none",
+  "status": "pending",
+  "scheduled_at": "2025-12-20 12:45:00"
+}
+
+### GET
+GET {{api}}/sms_messages/{{id}}
+
+### UPDATE
+PUT {{api}}/sms_messages/{{id}}
+Content-Type: application/json
+
+{
+  "status": "sent",
+  "sent_at": "2025-12-20 12:46:00"
+}
+
+### DELETE
+DELETE {{api}}/sms_messages/{{id}}

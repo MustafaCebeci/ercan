@@ -1,0 +1,36 @@
+@baseUrl = http://localhost:3000
+@api = {{baseUrl}}/api
+@id = 1
+
+### LIST
+GET {{api}}/appointments
+
+### CREATE
+POST {{api}}/appointments
+Content-Type: application/json
+
+{
+  "business_id": 1,
+  "branch_id": 1,
+  "staff_id": 1,
+  "service_id": 1,
+  "customer_id": 1,
+  "start_at": "2025-12-20 13:00:00",
+  "end_at": "2025-12-20 13:30:00",
+  "status": "pending",
+  "customer_note": "not"
+}
+
+### GET
+GET {{api}}/appointments/{{id}}
+
+### UPDATE
+PUT {{api}}/appointments/{{id}}
+Content-Type: application/json
+
+{
+  "status": "approved"
+}
+
+### DELETE
+DELETE {{api}}/appointments/{{id}}

@@ -1,0 +1,32 @@
+@baseUrl = http://localhost:3000
+@api = {{baseUrl}}/api
+@id = 1
+
+### LIST
+GET {{api}}/appointment_status_history
+
+### CREATE
+POST {{api}}/appointment_status_history
+Content-Type: application/json
+
+{
+  "appointment_id": 1,
+  "old_status": "pending",
+  "new_status": "approved",
+  "changed_by": "system",
+  "note": "test"
+}
+
+### GET
+GET {{api}}/appointment_status_history/{{id}}
+
+### UPDATE
+PUT {{api}}/appointment_status_history/{{id}}
+Content-Type: application/json
+
+{
+  "note": "test (güncel)"
+}
+
+### DELETE
+DELETE {{api}}/appointment_status_history/{{id}}

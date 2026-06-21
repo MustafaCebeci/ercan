@@ -1,0 +1,29 @@
+@baseUrl = http://localhost:3000
+@api = {{baseUrl}}/api
+@id = 1
+
+### LIST
+GET {{api}}/customers
+
+### CREATE
+POST {{api}}/customers
+Content-Type: application/json
+
+{
+  "phone": "05000000003",
+  "display_name": "Mehmet"
+}
+
+### GET
+GET {{api}}/customers/{{id}}
+
+### UPDATE
+PUT {{api}}/customers/{{id}}
+Content-Type: application/json
+
+{
+  "display_name": "Mehmet (Güncel)"
+}
+
+### DELETE
+DELETE {{api}}/customers/{{id}}

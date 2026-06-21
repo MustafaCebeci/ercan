@@ -1,0 +1,33 @@
+@baseUrl = http://localhost:3000
+@api = {{baseUrl}}/api
+@id = 1
+
+### LIST
+GET {{api}}/customer_business_flags
+
+### CREATE
+POST {{api}}/customer_business_flags
+Content-Type: application/json
+
+{
+  "business_id": 1,
+  "customer_id": 1,
+  "no_show_count": 0,
+  "is_blacklisted": 0,
+  "note": "ilk kayıt"
+}
+
+### GET
+GET {{api}}/customer_business_flags/{{id}}
+
+### UPDATE
+PUT {{api}}/customer_business_flags/{{id}}
+Content-Type: application/json
+
+{
+  "is_blacklisted": 1,
+  "note": "blacklist test"
+}
+
+### DELETE
+DELETE {{api}}/customer_business_flags/{{id}}

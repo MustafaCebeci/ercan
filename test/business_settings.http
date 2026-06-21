@@ -1,0 +1,30 @@
+@baseUrl = http://localhost:3000
+@api = {{baseUrl}}/api
+@business_id = 1
+
+### LIST
+GET {{api}}/business_settings
+
+### CREATE
+POST {{api}}/business_settings
+Content-Type: application/json
+
+{
+  "business_id": {{business_id}},
+  "settings_json": "{\"timezone\":\"Europe/Istanbul\",\"slot\":15}",
+  "updated_at": "2025-12-20 00:00:00"
+}
+
+### GET
+GET {{api}}/business_settings/{{business_id}}
+
+### UPDATE
+PUT {{api}}/business_settings/{{business_id}}
+Content-Type: application/json
+
+{
+  "settings_json": "{\"timezone\":\"Europe/Istanbul\",\"slot\":10}"
+}
+
+### DELETE
+DELETE {{api}}/business_settings/{{business_id}}

@@ -1,0 +1,32 @@
+@baseUrl = http://localhost:3000
+@api = {{baseUrl}}/api
+@id = 1
+
+### LIST
+GET {{api}}/branches
+
+### CREATE
+POST {{api}}/branches
+Content-Type: application/json
+
+{
+  "business_id": 1,
+  "name": "Merkez Şube",
+  "phone": "05000000001",
+  "address": "Şube adresi",
+  "is_active": 1
+}
+
+### GET
+GET {{api}}/branches/{{id}}
+
+### UPDATE
+PUT {{api}}/branches/{{id}}
+Content-Type: application/json
+
+{
+  "name": "Merkez Şube (Güncel)"
+}
+
+### DELETE
+DELETE {{api}}/branches/{{id}}

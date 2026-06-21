@@ -1,0 +1,32 @@
+@baseUrl = http://localhost:3000
+@api = {{baseUrl}}/api
+@id = 1
+
+### LIST
+GET {{api}}/branch_accounts
+
+### CREATE
+POST {{api}}/branch_accounts
+Content-Type: application/json
+
+{
+  "branch_id": 1,
+  "business_id": 1,
+  "email": "admin@ornek.com",
+  "password_hash": "HASH_BURAYA",
+  "is_active": 1
+}
+
+### GET
+GET {{api}}/branch_accounts/{{id}}
+
+### UPDATE
+PUT {{api}}/branch_accounts/{{id}}
+Content-Type: application/json
+
+{
+  "is_active": 1
+}
+
+### DELETE
+DELETE {{api}}/branch_accounts/{{id}}

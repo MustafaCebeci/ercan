@@ -1,0 +1,30 @@
+@baseUrl = http://localhost:3000
+@api = {{baseUrl}}/api
+@id = 1
+
+### LIST
+GET {{api}}/appointment_slots
+
+### CREATE
+POST {{api}}/appointment_slots
+Content-Type: application/json
+
+{
+  "appointment_id": 1,
+  "staff_id": 1,
+  "slot_time": "2025-12-20 13:00:00"
+}
+
+### GET
+GET {{api}}/appointment_slots/{{id}}
+
+### UPDATE
+PUT {{api}}/appointment_slots/{{id}}
+Content-Type: application/json
+
+{
+  "slot_time": "2025-12-20 13:15:00"
+}
+
+### DELETE
+DELETE {{api}}/appointment_slots/{{id}}

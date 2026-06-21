@@ -1,0 +1,36 @@
+@baseUrl = http://localhost:3000
+@api = {{baseUrl}}/api
+@id = 1
+
+### LIST
+GET {{api}}/businesses
+
+### CREATE
+POST {{api}}/businesses
+Content-Type: application/json
+
+{
+  "slug": "ornek-berber",
+  "name": "Örnek Berber",
+  "phone": "05000000000",
+  "city": "İstanbul",
+  "district": "Kadıköy",
+  "address": "Adres 1",
+  "description": "Test kayıt",
+  "is_active": 1
+}
+
+### GET
+GET {{api}}/businesses/{{id}}
+
+### UPDATE
+PUT {{api}}/businesses/{{id}}
+Content-Type: application/json
+
+{
+  "name": "Örnek Berber (Güncel)",
+  "is_active": 1
+}
+
+### DELETE
+DELETE {{api}}/businesses/{{id}}

@@ -1,0 +1,33 @@
+@baseUrl = http://localhost:3000
+@api = {{baseUrl}}/api
+@business_id = 1
+@staff_id = 1
+@service_id = 1
+
+### LIST
+GET {{api}}/staff_services
+
+### CREATE
+POST {{api}}/staff_services
+Content-Type: application/json
+
+{
+  "business_id": {{business_id}},
+  "staff_id": {{staff_id}},
+  "service_id": {{service_id}}
+}
+
+### GET
+GET {{api}}/staff_services/{{business_id}}/{{staff_id}}/{{service_id}}
+
+### UPDATE (genelde bu tabloda update olmaz; örnek yine de duruyor)
+PUT {{api}}/staff_services/{{business_id}}/{{staff_id}}/{{service_id}}
+Content-Type: application/json
+
+{
+  "staff_id": {{staff_id}},
+  "service_id": {{service_id}}
+}
+
+### DELETE
+DELETE {{api}}/staff_services/{{business_id}}/{{staff_id}}/{{service_id}}
