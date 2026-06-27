@@ -15,6 +15,12 @@ vi.mock('../../config.js', () => ({
       'SMS_BASLIK': 'TEST',
       'SMS_ENDPOINT': 'https://test.api.mesajpaneli.com',
       'SMS_VERIFY_SSL': 'false',
+      'SMS_PROVIDER': 'mesajpaneli',
+      'NETGSM_USER': 'testuser',
+      'NETGSM_PASS': 'testpass',
+      'NETGSM_HEADER': 'TEST',
+      'NETGSM_ENDPOINT': 'https://test.api.netgsm.com.tr',
+      'NETGSM_VERIFY_SSL': 'false',
       'GMAIL_USER': 'test@gmail.com',
       'GMAIL_PASS': 'testpassword',
     };
@@ -25,13 +31,13 @@ vi.mock('../../config.js', () => ({
   }),
 }));
 
-// Mock MesajPaneliApi
-vi.mock('../../MesajPaneliApi.js', () => ({
-  CredentialsUsernamePassword: vi.fn().mockImplementation(() => ({})),
-  TopluMesaj: vi.fn().mockImplementation((metin, telefon) => ({ metin, telefon })),
-  MesajPaneliApi: vi.fn().mockImplementation(() => ({
+// Mock sms.provider.js
+vi.mock('../../sms.provider.js', () => ({
+  createSmsProvider: vi.fn().mockImplementation(() => ({
     topluMesajGonder: vi.fn().mockResolvedValue({ status: true, msg_id: 'mock-123' }),
+    getProviderName: vi.fn().mockReturnValue('mesajpaneli'),
   })),
+  TopluMesaj: vi.fn().mockImplementation((metin, telefon) => ({ metin, telefon })),
 }));
 
 // Mock models (pool)
@@ -241,9 +247,10 @@ describe('sendSms()', () => {
   });
 
   it('throws and logs on SMS API error', async () => {
-    const { MesajPaneliApi } = require('../../MesajPaneliApi.js');
-    MesajPaneliApi.mockImplementation(() => ({
+    const { createSmsProvider } = require('../../sms.provider.js');
+    createSmsProvider.mockImplementation(() => ({
       topluMesajGonder: vi.fn().mockRejectedValue(new Error('API Error')),
+      getProviderName: vi.fn().mockReturnValue('mesajpaneli'),
     }));
 
     pool.execute.mockResolvedValue([{ affectedRows: 1 }]);

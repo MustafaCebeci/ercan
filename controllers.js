@@ -128,10 +128,13 @@ async function createConfirmedAppointmentWithSlots({
     slotRangeEnd,
     customerNote,
     changedBy = "system",
+    isCustom = false,
+    customServiceName = "Özel Randevu",
+    customPrice = null,
 }) {
     if (!conn) throw httpError(500, "DB connection missing");
     if (!provider?.id) throw httpError(500, "Provider missing");
-    if (!service?.id) throw httpError(500, "Service missing");
+    if (!isCustom && !service?.id) throw httpError(500, "Service missing");
     if (!customerId) throw httpError(400, "customerId missing");
     if (!startAt) throw httpError(400, "startAt missing");
     if (!Number.isFinite(Number(durationMin)) || Number(durationMin) <= 0) {
@@ -141,31 +144,36 @@ async function createConfirmedAppointmentWithSlots({
         throw httpError(500, "Slot range invalid");
     }
 
+    const serviceIdToInsert = isCustom ? null : service.id;
+    const serviceNameSnapshot = isCustom ? customServiceName : service.name;
+    const serviceDurationSnapshot = isCustom ? durationMin : service.duration_minutes;
+    const servicePriceSnapshot = isCustom ? customPrice : (service.price ?? null);
+
     const endAtSqlExpr = `DATE_ADD(?, INTERVAL ? MINUTE)`;
 
     const [r1] = await conn.execute(
         `
         INSERT INTO appointments
           (
-            provider_id, service_id, customer_id,
+            provider_id, service_id, is_custom, customer_id,
             start_at, end_at,
             service_name_snapshot, service_duration_minutes_snapshot, service_price_snapshot,
             provider_name_snapshot, provider_type_snapshot,
-            status, customer_note
+            customer_note
           )
         VALUES
-          (?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, 'confirmed', ?)
+          (?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
         `,
         [
             provider.id,
-            service.id,
+            serviceIdToInsert,
+            isCustom ? 1 : 0,
             customerId,
             startAt,
             startAt,
-            durationMin,
-            service.name,
-            service.duration_minutes,
-            service.price ?? null,
+            serviceNameSnapshot,
+            serviceDurationSnapshot,
+            servicePriceSnapshot,
             provider.name,
             provider.provider_type,
             customerNote ?? null,
@@ -744,13 +752,15 @@ const BookingControllers = {
         const body = req.body || {};
         const branchIdBody = Number(body.branchId ?? body.branch_id);
         const staffId = Number(body.staffId ?? body.staff_id);
-        const serviceId = Number(body.serviceId ?? body.service_id);
+        const rawServiceId = body.serviceId ?? body.service_id;
+        const serviceId = rawServiceId ? Number(rawServiceId) : null;
+        const isCustom = !serviceId;
         const dateStr = String(body.date || "").trim();
         const timeStr = String(body.time || "").trim();
         const customerNote = body.customer_note ?? null;
         const noPhone = !!body.no_phone;
 
-        if (!staffId || !serviceId) throw httpError(400, "staffId, serviceId zorunlu");
+        if (!staffId) throw httpError(400, "staffId zorunlu");
         if (!dateStr || !timeStr) throw httpError(400, "date ve time zorunlu (YYYY-MM-DD, HH:MM)");
 
         // businessId already resolved above
@@ -808,20 +818,29 @@ const BookingControllers = {
 
 
         // service doğrula (duration çekme yok)
-        const [svcRows] = await pool.execute(
-            `SELECT id, name, duration_minutes, price, is_active
-             FROM services WHERE id = ? LIMIT 1`,
-            [serviceId]
-        );
-        const svc = svcRows[0];
-        if (!svc) throw httpError(404, "Service not found");
-        if (Number(svc.is_active) === 0) throw httpError(400, "Service inactive");
-
-        const durationMinRaw = Number(svc.duration_minutes);
-        if (!Number.isFinite(durationMinRaw) || durationMinRaw <= 0) {
-            throw httpError(500, "Invalid service duration");
+        // Custom randevularda service validation atlanır
+        let svc = null;
+        let durationMin = 0;
+        if (!isCustom) {
+            const [svcRows] = await pool.execute(
+                `SELECT id, name, duration_minutes, price, is_active
+                 FROM services WHERE id = ? LIMIT 1`,
+                [serviceId]
+            );
+            svc = svcRows[0];
+            if (!svc) throw httpError(404, "Service not found");
+            if (Number(svc.is_active) === 0) throw httpError(400, "Service inactive");
+            const durationMinRaw = Number(svc.duration_minutes);
+            if (!Number.isFinite(durationMinRaw) || durationMinRaw <= 0) {
+                throw httpError(500, "Invalid service duration");
+            }
+            durationMin = durationMinRaw;
+        } else {
+            durationMin = Number(body.custom_duration_minutes ?? 30);
+            if (!Number.isFinite(durationMin) || durationMin <= 0) {
+                throw httpError(400, "Gecersiz custom_duration_minutes");
+            }
         }
-        const durationMin = durationMinRaw;
         const blockDurationMin = roundUpToStep(durationMin, VIRTUAL_SLOT_MINUTES);
 
         const endMin = startMin + durationMin;
@@ -843,41 +862,51 @@ const BookingControllers = {
         const st = stRows[0]; 
         if (!st) throw httpError(404, "Staff not found");
 
-        // staff_services doğrula
+        // staff_services doğrula (custom randevularda atlanır)
         const provider = await ensureStaffProvider(staffId);
         if (!provider) throw httpError(404, "Provider not found");
         if (Number(provider.is_active) === 0) throw httpError(400, "Provider inactive");
 
-        const [ssRows] = await pool.execute(
-            `SELECT provider_id, service_id FROM provider_services
-             WHERE provider_id = ? AND service_id = ? LIMIT 1`,
-            [provider.id, serviceId]
-        );
-        if (!ssRows.length) throw httpError(400, "Staff does not provide this service");
-
-        // period_settings kontrolü - özel fiyat varsa kullan
-        let effectivePrice = svc.price ?? null;
-        try {
-            const [periodRows] = await pool.execute(
-                `SELECT data_json FROM period_settings
-                 WHERE start_date <= ? AND end_date >= ?
-                 LIMIT 1`,
-                [dateStr, dateStr]
+        if (!isCustom) {
+            const [ssRows] = await pool.execute(
+                `SELECT provider_id, service_id FROM provider_services
+                 WHERE provider_id = ? AND service_id = ? LIMIT 1`,
+                [provider.id, serviceId]
             );
-            if (periodRows.length > 0) {
-                let dataJson = periodRows[0].data_json;
-                if (typeof dataJson === "string") {
-                    dataJson = JSON.parse(dataJson);
+            if (!ssRows.length) throw httpError(400, "Staff does not provide this service");
+        }
+
+        // period_settings kontrolü - özel fiyat varsa kullan (custom randevularda atlanır)
+        let effectivePrice = null;
+        if (!isCustom && svc) {
+            effectivePrice = svc.price ?? null;
+            try {
+                const [periodRows] = await pool.execute(
+                    `SELECT data_json FROM period_settings
+                     WHERE start_date <= ? AND end_date >= ?
+                     LIMIT 1`,
+                    [dateStr, dateStr]
+                );
+                if (periodRows.length > 0) {
+                    let dataJson = periodRows[0].data_json;
+                    if (typeof dataJson === "string") {
+                        dataJson = JSON.parse(dataJson);
+                    }
+                    const costs = dataJson?.cost || [];
+                    const costEntry = costs.find(c => Number(c.service_id) === serviceId);
+                    if (costEntry && costEntry.price !== undefined) {
+                        effectivePrice = Number(costEntry.price);
+                        console.log(`[book] period override: service ${serviceId} price ${svc.price} -> ${effectivePrice}`);
+                    }
                 }
-                const costs = dataJson?.cost || [];
-                const costEntry = costs.find(c => Number(c.service_id) === serviceId);
-                if (costEntry && costEntry.price !== undefined) {
-                    effectivePrice = Number(costEntry.price);
-                    console.log(`[book] period override: service ${serviceId} price ${svc.price} -> ${effectivePrice}`);
-                }
+            } catch (err) {
+                console.error("[book] period_settings check failed:", err);
             }
-        } catch (err) {
-            console.error("[book] period_settings check failed:", err);
+        } else {
+            // Custom randevu: fiyat body'den alınır
+            if (body.custom_price !== undefined) {
+                effectivePrice = Number(body.custom_price);
+            }
         }
 
         const [closureRows] = await pool.execute(
@@ -908,26 +937,26 @@ const BookingControllers = {
                 `
           INSERT INTO appointments
             (
-              provider_id, service_id, customer_id,
+              provider_id, service_id, is_custom, customer_id,
               start_at, end_at,
               service_name_snapshot, service_duration_minutes_snapshot, service_price_snapshot,
               provider_name_snapshot, provider_type_snapshot,
-              status, customer_note
+              customer_note
             )
           VALUES
-            (?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, 'confirmed', ?)
+            (?, ?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
         `,
-                // ✅ param sırası düzeltildi:
                 // end_at expr: DATE_ADD(start_at, durationMin)
                 [
                     provider.id,
                     serviceId,
+                    0,
                     customerId,
                     startAt,
                     startAt,
-                    durationMin,
-                    svc.name,
-                    svc.duration_minutes,
+                    isCustom ? durationMin : svc.duration_minutes,
+                    isCustom ? (body.custom_service_name ?? "Özel Randevu") : svc.name,
+                    isCustom ? durationMin : svc.duration_minutes,
                     effectivePrice,
                     provider.name,
                     provider.provider_type,
@@ -1001,7 +1030,7 @@ const BookingControllers = {
                         customerPhone = cRows[0]?.phone ?? null;
                     }
                     if (customerPhone) {
-                        const msg = `Randevunuz olusturuldu. Tarih: ${dateStr} ${timeStr}. Hizmet: ${svc.name}.`;
+                        const msg = `Ercan İncirkuş Berber Dükkanı - Randevunuz olusturuldu. Tarih: ${dateStr} ${timeStr}. Hizmet: ${svc.name}.`;
                         await sendSms({
                             appointment_id: appointmentId,
                             phone: customerPhone,
@@ -1024,7 +1053,7 @@ const BookingControllers = {
                     );
                     const staffPhone = staffRows[0]?.phone ?? null;
                     if (staffPhone) {
-                        const msg = `Yeni randevu: ${svc.name}, ${dateStr} ${timeStr}.`;
+                        const msg = `Ercan İncirkuş Berber Dükkanı - Yeni randevu: ${svc.name}, ${dateStr} ${timeStr}.`;
                         await sendSms({
                             appointment_id: appointmentId,
                             phone: staffPhone,
@@ -1308,6 +1337,7 @@ const BookingControllers = {
                 a.service_price_snapshot,
                 c.id AS customer_id_out,
                 c.display_name AS customer_name,
+                c.nickname AS customer_nickname,
                 c.phone AS customer_phone,
                 st.id AS staff_out_id,
                 st.full_name AS staff_out_name
@@ -1346,6 +1376,7 @@ const BookingControllers = {
             customerId: row.customer_id,
             title: row.service_name_snapshot,
             customerName: row.customer_name,
+            customerNickname: row.customer_nickname ?? null,
             customerPhone: row.customer_phone,
             providerType: row.provider_type,
             staffName: row.staff_out_name || null,
@@ -1401,11 +1432,15 @@ const BookingControllers = {
                 a.status,
                 a.service_name_snapshot,
                 a.service_price_snapshot,
-                c.display_name AS customer_name
+                a.customer_note,
+                c.display_name AS customer_name,
+                c.nickname AS customer_nickname,
+                c.phone AS customer_phone
             FROM appointments a
             LEFT JOIN customers c ON c.id = a.customer_id
             LEFT JOIN service_providers sp ON sp.id = a.provider_id
             WHERE a.start_at >= ? AND a.start_at <= ?
+                And status IN ('confirmed', 'completed')
         `;
         const params = [startDateTime, endDateTime];
 
@@ -1432,6 +1467,9 @@ const BookingControllers = {
             customerId: row.customer_id,
             title: row.service_name_snapshot,
             customerName: row.customer_name,
+            customerNickname: row.customer_nickname ?? null,
+            customerPhone: row.customer_phone ?? null,
+            customerNote: row.customer_note ?? null,
             start: row.start_at,
             end: row.end_at,
             status: row.status,
@@ -1477,6 +1515,7 @@ const BookingControllers = {
                 a.service_price_snapshot,
                 c.id AS customer_id_out,
                 c.display_name AS customer_name,
+                c.nickname AS customer_nickname,
                 c.phone AS customer_phone,
                 st.id AS staff_out_id,
                 st.full_name AS staff_out_name
@@ -1525,6 +1564,7 @@ const BookingControllers = {
                     ? {
                         id: row.customer_id_out,
                         display_name: row.customer_name,
+                        nickname: row.customer_nickname ?? null,
                         phone: row.customer_phone,
                     }
                     : null,
@@ -1690,7 +1730,9 @@ const BookingControllers = {
         const dateStr = String(body.date || "").trim();
         const timeStr = String(body.time || "").trim();
         const endTimeStr = body.endTime ? String(body.endTime).trim() : null;
-        const serviceId = body.serviceId ? Number(body.serviceId) : null;
+        // serviceId: explicitly null = custom appointment, number = normal, undefined = keep existing
+        const serviceIdProvided = body.serviceId !== undefined;
+        const serviceId = body.serviceId !== undefined && body.serviceId !== null ? Number(body.serviceId) : null;
         const requestedProviderId = body.provider_id ? Number(body.provider_id) : null;
         const requestedStaffIdRaw = body.staffId;
         const requestedStaffId = requestedStaffIdRaw ? Number(requestedStaffIdRaw) : null;
@@ -1720,42 +1762,54 @@ const BookingControllers = {
 
             // Get current appointment
             const [rows] = await conn.execute(
-                `SELECT id, customer_id, provider_id, service_id, start_at, end_at, status
+                `SELECT id, customer_id, provider_id, service_id, is_custom, start_at, end_at, status
                  FROM appointments WHERE id = ? LIMIT 1 FOR UPDATE`,
                 [appointmentId]
             );
             const ap = rows[0];
             if (!ap) throw httpError(404, "Appointment not found");
 
-            // Hangi provider kullanılacak: body'deki provider_id öncelikli, yoksa token'dan
-            let targetProviderId = staffId;
+            // Provider değişikliği kontrolü: body.provider_id varsa kullan, yoksa mevcut korunsun
+            let targetProviderId = null;
             if (requestedProviderId) {
-                // provider_id body'den geldi - admin kontrolü gerekiyor mu kontrol et
-                if (Number(ap.provider_id) !== requestedProviderId) {
-                    if (!isAdmin) {
-                        await requireAdminUser(decoded, businessId, branchId);
-                    }
-                    targetProviderId = requestedProviderId;
+                targetProviderId = requestedProviderId;
+                if (Number(ap.provider_id) !== targetProviderId) {
+                    await requireAdminUser(decoded, businessId, branchId);
                 }
             }
 
-            // Check permission
-            const provider = await ensureStaffProvider(targetProviderId);
-            if (!provider) throw httpError(404, "Provider not found");
-            if (!isAdmin && !requestedProviderId && Number(ap.provider_id) !== Number(provider.id)) {
-                throw httpError(403, "Not allowed");
+            // Provider'ı al: değişiklik varsa yeni provider, yoksa mevcut provider korunsun
+            let provider;
+            if (targetProviderId) {
+                provider = await ensureStaffProvider(targetProviderId);
+                if (!provider) throw httpError(404, "Provider not found");
+            } else {
+                provider = { id: Number(ap.provider_id) };
+            }
+
+            // is_custom: explicitly null serviceId = custom, number = normal, undefined = keep existing
+            let isCustomUpdate = Number(ap.is_custom);
+            if (serviceIdProvided) {
+                isCustomUpdate = serviceId === null ? 1 : 0;
             }
 
             // Get service duration
-            const serviceIdToUse = serviceId || ap.service_id;
-            const [svcRows] = await conn.execute(
-                `SELECT duration_minutes FROM services WHERE id = ? LIMIT 1`,
-                [serviceIdToUse]
-            );
-            const svc = svcRows[0];
-            if (!svc) throw httpError(404, "Service not found");
-
-            const durationMin = Number(svc.duration_minutes);
+            let durationMin;
+            if (isCustomUpdate === 1) {
+                durationMin = Number(body.custom_duration_minutes ?? 30);
+                if (!Number.isFinite(durationMin) || durationMin <= 0) {
+                    throw httpError(400, "Gecersiz custom_duration_minutes");
+                }
+            } else {
+                const serviceIdToUse = serviceId || ap.service_id;
+                const [svcRows] = await conn.execute(
+                    `SELECT duration_minutes FROM services WHERE id = ? LIMIT 1`,
+                    [serviceIdToUse]
+                );
+                const svc = svcRows[0];
+                if (!svc) throw httpError(404, "Service not found");
+                durationMin = Number(svc.duration_minutes);
+            }
             let blockDurationMin = roundUpToStep(durationMin, VIRTUAL_SLOT_MINUTES);
             let endAt;
 
@@ -1776,11 +1830,13 @@ const BookingControllers = {
             const endH = endAt.hour;
             const endM = endAt.minute;
             const endAtStr = `${dateStr} ${String(endH).padStart(2, "0")}:${String(endM).padStart(2, "0")}:00`;
+            // serviceId: null if custom, number if normal, keep existing if not provided
+            const serviceIdToPersist = !serviceIdProvided ? ap.service_id : serviceId;
             await conn.execute(
                 `UPDATE appointments
-                 SET start_at = ?, end_at = ?, service_id = ?, provider_id = ?, updated_at = ?
+                 SET start_at = ?, end_at = ?, service_id = ?, is_custom = ?, provider_id = ?, updated_at = ?
                  WHERE id = ?`,
-                [startAt, endAtStr, serviceIdToUse, provider.id, t.toISODateTime(t.now()), appointmentId]
+                [startAt, endAtStr, serviceIdToPersist, isCustomUpdate, provider.id, t.toISODateTime(t.now()), appointmentId]
             );
 
             // Update slots if confirmed
@@ -1818,7 +1874,7 @@ const BookingControllers = {
                     if (customer?.phone) {
                         const oldTime = t.formatDateTime(ap.start_at);
                         const newTime = t.formatDateTime(startAt);
-                        const msg = `Randevunuz ${oldTime} yerine ${newTime} saatine taşınmıştır. Saygılarımızla.`;
+                        const msg = `Ercan İncirkuş Berber Dükkanı - Randevunuz ${oldTime} yerine ${newTime} saatine taşınmıştır. Saygılarımızla.`;
                         await sendSms({ phone: customer.phone, message: msg, type: "general" });
                     }
                 } catch (smsErr) {
@@ -1998,7 +2054,7 @@ const BookingControllers = {
         requireUser(req);
         const [rows] = await pool.execute(
             `SELECT
-                c.id, c.display_name, c.phone, c.created_at,
+                c.id, c.display_name, c.nickname, c.phone, c.created_at,
                 COALESCE(cf.is_blacklisted, 0) AS is_blacklisted,
                 COALESCE(cf.no_show_count, 0) AS no_show_count,
                 COUNT(a.id) AS total_appointments,
@@ -2018,7 +2074,7 @@ const BookingControllers = {
         requireUser(req);
         const [rows] = await pool.execute(
             `SELECT
-                c.id, c.display_name, c.phone, c.created_at,
+                c.id, c.display_name, c.nickname, c.phone, c.created_at,
                 COALESCE(cf.is_blacklisted, 0) AS is_blacklisted,
                 COALESCE(cf.no_show_count, 0) AS no_show_count,
                 COUNT(a.id) AS total_appointments,
@@ -2093,7 +2149,9 @@ const BookingControllers = {
         const branchId = getPersonalBranchId();
 
         const body = req.body || {};
-        const serviceId = Number(body.serviceId ?? body.service_id);
+        const rawServiceId = body.serviceId ?? body.service_id;
+        const serviceId = rawServiceId ? Number(rawServiceId) : null;
+        const isCustom = !serviceId;
         const requestedStaffIdRaw = body.staffId ?? body.staff_id;
         const requestedStaffId = requestedStaffIdRaw ? Number(requestedStaffIdRaw) : null;
         const dateStr = String(body.date || "").trim();
@@ -2102,7 +2160,6 @@ const BookingControllers = {
         const displayName = body.display_name ?? body.displayName ?? null;
         const customerNote = body.customer_note ?? null;
 
-        if (!serviceId) throw httpError(400, "serviceId zorunlu");
         if (!dateStr || !timeStr) throw httpError(400, "date ve time zorunlu (YYYY-MM-DD, HH:MM)");
         if (!phone) throw httpError(400, "phone zorunlu");
 
@@ -2141,20 +2198,29 @@ const BookingControllers = {
         if (!st) throw httpError(404, "Staff not found");
         if (Number(st.is_active) === 0) throw httpError(400, "Staff inactive");
 
-        const [svcRows] = await pool.execute(
-            `SELECT id, name, duration_minutes, price, is_active
-             FROM services WHERE id = ? LIMIT 1`,
-            [serviceId]
-        );
-        const svc = svcRows[0];
-        if (!svc) throw httpError(404, "Service not found");
-        if (Number(svc.is_active) === 0) throw httpError(400, "Service inactive");
-
-        const durationMinRaw = Number(svc.duration_minutes);
-        if (!Number.isFinite(durationMinRaw) || durationMinRaw <= 0) {
-            throw httpError(500, "Invalid service duration");
+        // Custom randevularda service validation atlanır
+        let svc = null;
+        let durationMin = 0;
+        if (!isCustom) {
+            const [svcRows] = await pool.execute(
+                `SELECT id, name, duration_minutes, price, is_active
+                 FROM services WHERE id = ? LIMIT 1`,
+                [serviceId]
+            );
+            svc = svcRows[0];
+            if (!svc) throw httpError(404, "Service not found");
+            if (Number(svc.is_active) === 0) throw httpError(400, "Service inactive");
+            const durationMinRaw = Number(svc.duration_minutes);
+            if (!Number.isFinite(durationMinRaw) || durationMinRaw <= 0) {
+                throw httpError(500, "Invalid service duration");
+            }
+            durationMin = durationMinRaw;
+        } else {
+            durationMin = Number(body.custom_duration_minutes ?? 30);
+            if (!Number.isFinite(durationMin) || durationMin <= 0) {
+                throw httpError(400, "Gecersiz custom_duration_minutes");
+            }
         }
-        const durationMin = durationMinRaw;
         const blockDurationMin = roundUpToStep(durationMin, VIRTUAL_SLOT_MINUTES);
 
         const endMin = startMin + durationMin;
@@ -2167,12 +2233,14 @@ const BookingControllers = {
         if (!provider) throw httpError(404, "Provider not found");
         if (Number(provider.is_active) === 0) throw httpError(400, "Provider inactive");
 
-        const [ssRows] = await pool.execute(
-            `SELECT provider_id, service_id FROM provider_services
-             WHERE provider_id = ? AND service_id = ? LIMIT 1`,
-            [provider.id, serviceId]
-        );
-        if (!ssRows.length) throw httpError(400, "Staff does not provide this service");
+        if (!isCustom) {
+            const [ssRows] = await pool.execute(
+                `SELECT provider_id, service_id FROM provider_services
+                 WHERE provider_id = ? AND service_id = ? LIMIT 1`,
+                [provider.id, serviceId]
+            );
+            if (!ssRows.length) throw httpError(400, "Staff does not provide this service");
+        }
 
         const [cRows] = await pool.execute(
             `SELECT id, phone, is_active FROM customers WHERE phone = ? LIMIT 1`,
@@ -2228,25 +2296,25 @@ const BookingControllers = {
                 `
            INSERT INTO appointments
              (
-              provider_id, service_id, customer_id,
+              provider_id, service_id, is_custom, customer_id,
               start_at, end_at,
               service_name_snapshot, service_duration_minutes_snapshot, service_price_snapshot,
               provider_name_snapshot, provider_type_snapshot,
-              status, customer_note
+              customer_note
             )
           VALUES
-            (?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, 'confirmed', ?)
+            (?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
         `,
                 [
                     provider.id,
                     serviceId,
+                    isCustom ? 1 : 0,
                     customerId,
                     startAt,
                     startAt,
-                    durationMin,
-                    svc.name,
-                    svc.duration_minutes,
-                    svc.price ?? null,
+                    isCustom ? (body.custom_service_name ?? "Özel Randevu") : svc.name,
+                    isCustom ? durationMin : svc.duration_minutes,
+                    isCustom ? (body.custom_price !== undefined ? Number(body.custom_price) : null) : (svc.price ?? null),
                     provider.name,
                     provider.provider_type,
                     customerNote
@@ -2326,7 +2394,9 @@ const BookingControllers = {
         const branchId = getPersonalBranchId();
 
         const body = req.body || {};
-        const serviceId = Number(body.serviceId ?? body.service_id);
+        const rawServiceId = body.serviceId ?? body.service_id;
+        const serviceId = rawServiceId ? Number(rawServiceId) : null;
+        const isCustom = !serviceId;
         const requestedStaffIdRaw = body.staffId ?? body.staff_id;
         const requestedStaffId = requestedStaffIdRaw ? Number(requestedStaffIdRaw) : null;
         const dateStr = String(body.date || "").trim();
@@ -2335,7 +2405,6 @@ const BookingControllers = {
         const displayName = body.display_name ?? body.displayName ?? null;
         const customerNote = body.customer_note ?? null;
 
-        if (!serviceId) throw httpError(400, "serviceId zorunlu");
         if (!dateStr || !timeStr) throw httpError(400, "date ve time zorunlu (YYYY-MM-DD, HH:MM)");
         if (!phone) throw httpError(400, "phone zorunlu");
 
@@ -2361,20 +2430,29 @@ const BookingControllers = {
         if (!st) throw httpError(404, "Staff not found");
         if (Number(st.is_active) === 0) throw httpError(400, "Staff inactive");
 
-        const [svcRows] = await pool.execute(
-            `SELECT id, name, duration_minutes, price, is_active
-             FROM services WHERE id = ? LIMIT 1`,
-            [serviceId]
-        );
-        const svc = svcRows[0];
-        if (!svc) throw httpError(404, "Service not found");
-        if (Number(svc.is_active) === 0) throw httpError(400, "Service inactive");
-
-        const durationMinRaw = Number(svc.duration_minutes);
-        if (!Number.isFinite(durationMinRaw) || durationMinRaw <= 0) {
-            throw httpError(500, "Invalid service duration");
+        // Custom randevularda service validation atlanır
+        let svc = null;
+        let durationMin = 0;
+        if (!isCustom) {
+            const [svcRows] = await pool.execute(
+                `SELECT id, name, duration_minutes, price, is_active
+                 FROM services WHERE id = ? LIMIT 1`,
+                [serviceId]
+            );
+            svc = svcRows[0];
+            if (!svc) throw httpError(404, "Service not found");
+            if (Number(svc.is_active) === 0) throw httpError(400, "Service inactive");
+            const durationMinRaw = Number(svc.duration_minutes);
+            if (!Number.isFinite(durationMinRaw) || durationMinRaw <= 0) {
+                throw httpError(500, "Invalid service duration");
+            }
+            durationMin = durationMinRaw;
+        } else {
+            durationMin = Number(body.custom_duration_minutes ?? 30);
+            if (!Number.isFinite(durationMin) || durationMin <= 0) {
+                throw httpError(400, "Gecersiz custom_duration_minutes");
+            }
         }
-        const durationMin = durationMinRaw;
         const blockDurationMin = roundUpToStep(durationMin, VIRTUAL_SLOT_MINUTES);
         const slotTimes = buildSlotTimes(dateStr, startMin, blockDurationMin);
         const slotRangeStart = `${dateStr} ${minutesToHHMM(startMin)}:00`;
@@ -2384,11 +2462,13 @@ const BookingControllers = {
         if (!provider) throw httpError(404, "Provider not found");
         if (Number(provider.is_active) === 0) throw httpError(400, "Provider inactive");
 
-        const [psRows] = await pool.execute(
-            `SELECT provider_id FROM provider_services WHERE provider_id = ? AND service_id = ? LIMIT 1`,
-            [provider.id, serviceId]
-        );
-        if (!psRows.length) throw httpError(400, "Staff does not provide this service");
+        if (!isCustom) {
+            const [psRows] = await pool.execute(
+                `SELECT provider_id FROM provider_services WHERE provider_id = ? AND service_id = ? LIMIT 1`,
+                [provider.id, serviceId]
+            );
+            if (!psRows.length) throw httpError(400, "Staff does not provide this service");
+        }
 
         const [cRows] = await pool.execute(
             `SELECT id, phone, is_active FROM customers WHERE phone = ? LIMIT 1`,
@@ -2424,25 +2504,25 @@ const BookingControllers = {
                 `
            INSERT INTO appointments
              (
-              provider_id, service_id, customer_id,
+              provider_id, service_id, is_custom, customer_id,
               start_at, end_at,
               service_name_snapshot, service_duration_minutes_snapshot, service_price_snapshot,
               provider_name_snapshot, provider_type_snapshot,
-              status, customer_note
+              customer_note
             )
           VALUES
-            (?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, 'confirmed', ?)
+            (?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
         `,
                 [
                     provider.id,
                     serviceId,
+                    isCustom ? 1 : 0,
                     customerId,
                     startAt,
                     startAt,
-                    durationMin,
-                    svc.name,
-                    svc.duration_minutes,
-                    svc.price ?? null,
+                    isCustom ? (body.custom_service_name ?? "Özel Randevu") : svc.name,
+                    isCustom ? durationMin : svc.duration_minutes,
+                    isCustom ? (body.custom_price !== undefined ? Number(body.custom_price) : null) : (svc.price ?? null),
                     provider.name,
                     provider.provider_type,
                     customerNote
@@ -2520,13 +2600,15 @@ const BookingControllers = {
 
         const body = req.body || {};
         const providerId = Number(body.provider_id);
-        const serviceId = Number(body.service_id);
+        const rawServiceId = body.service_id;
+        const serviceId = rawServiceId ? Number(rawServiceId) : null;
+        const isCustom = !serviceId;
         const dateStr = String(body.date || "").trim();
         const timeStr = String(body.time || "").trim();
         const customerId = Number(body.customer_id);
         const customerNote = body.customer_note ?? null;
 
-        if (!providerId || !serviceId) throw httpError(400, "provider_id, service_id zorunlu");
+        if (!providerId) throw httpError(400, "provider_id zorunlu");
         if (!dateStr || !timeStr) throw httpError(400, "date ve time zorunlu (YYYY-MM-DD, HH:MM)");
         if (!customerId) throw httpError(400, "customer_id zorunlu");
 
@@ -2548,27 +2630,37 @@ const BookingControllers = {
         if (!provider) throw httpError(404, "Provider not found");
         if (Number(provider.is_active) === 0) throw httpError(400, "Provider inactive");
 
-        // Service dogrula
-        const [sRows] = await pool.execute(
-            `SELECT id, name, duration_minutes, price, is_active FROM services WHERE id = ? LIMIT 1`,
-            [serviceId]
-        );
-        const svc = sRows[0];
-        if (!svc) throw httpError(404, "Service not found");
-        if (Number(svc.is_active) === 0) throw httpError(400, "Service inactive");
-
-        const durationMin = Number(svc.duration_minutes);
+        // Service dogrula (custom randevularda atlanır)
+        let svc = null;
+        let durationMin = 0;
+        if (!isCustom) {
+            const [sRows] = await pool.execute(
+                `SELECT id, name, duration_minutes, price, is_active FROM services WHERE id = ? LIMIT 1`,
+                [serviceId]
+            );
+            svc = sRows[0];
+            if (!svc) throw httpError(404, "Service not found");
+            if (Number(svc.is_active) === 0) throw httpError(400, "Service inactive");
+            durationMin = Number(svc.duration_minutes);
+        } else {
+            durationMin = Number(body.custom_duration_minutes ?? 30);
+            if (!Number.isFinite(durationMin) || durationMin <= 0) {
+                throw httpError(400, "Gecersiz custom_duration_minutes");
+            }
+        }
         const blockDurationMin = roundUpToStep(durationMin, VIRTUAL_SLOT_MINUTES);
         const slotTimes = buildSlotTimes(dateStr, startMin, blockDurationMin);
         const slotRangeStart = `${dateStr} ${minutesToHHMM(startMin)}:00`;
         const slotRangeEnd = `${dateStr} ${minutesToHHMM(startMin + blockDurationMin)}:00`;
 
-        // Provider-service iliskisi
-        const [psRows] = await pool.execute(
-            `SELECT provider_id FROM provider_services WHERE provider_id = ? AND service_id = ? LIMIT 1`,
-            [provider.id, serviceId]
-        );
-        if (!psRows.length) throw httpError(400, "Provider does not provide this service");
+        // Provider-service iliskisi (custom randevularda atlanır)
+        if (!isCustom) {
+            const [psRows] = await pool.execute(
+                `SELECT provider_id FROM provider_services WHERE provider_id = ? AND service_id = ? LIMIT 1`,
+                [provider.id, serviceId]
+            );
+            if (!psRows.length) throw httpError(400, "Provider does not provide this service");
+        }
 
         // Closure kontrolu
         const [clRows] = await pool.execute(
@@ -2628,25 +2720,26 @@ const BookingControllers = {
                 `
           INSERT INTO appointments
             (
-              provider_id, service_id, customer_id,
+              provider_id, service_id, is_custom, customer_id,
               start_at, end_at,
               service_name_snapshot, service_duration_minutes_snapshot, service_price_snapshot,
               provider_name_snapshot, provider_type_snapshot,
-              status, customer_note
+              customer_note
             )
           VALUES
-            (?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, 'confirmed', ?)
+            (?, ?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
         `,
                 [
                     provider.id,
                     serviceId,
+                    isCustom ? 1 : 0,
                     customerId,
                     startAt,
                     startAt,
                     durationMin,
-                    svc.name,
-                    svc.duration_minutes,
-                    svc.price ?? null,
+                    isCustom ? (body.custom_service_name ?? "Özel Randevu") : svc.name,
+                    isCustom ? durationMin : svc.duration_minutes,
+                    isCustom ? (body.custom_price !== undefined ? Number(body.custom_price) : null) : (svc.price ?? null),
                     provider.name,
                     provider.provider_type,
                     customerNote
@@ -2705,6 +2798,235 @@ const BookingControllers = {
                     ok: false,
                     message: "Bu randevu zaten mevcut"
                 });
+            }
+            throw err;
+        } finally {
+            conn.release();
+        }
+    }),
+
+    /**
+     * POST /api/appointments/custom
+     * Body: {
+     *   provider_id, date (YYYY-MM-DD), time (HH:MM), end_time (HH:MM),
+     *   is_custom (0|1),
+     *   customer_id,
+     *   customer_note,
+     *   -- standard: service_id
+     *   -- custom: custom_service_name, custom_duration_minutes, custom_price?
+     * }
+     */
+    createCustom: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        const staffIdFromToken = decoded.staff_id ?? decoded.staffId ?? null;
+        if (!staffIdFromToken) throw httpError(403, "staff_id missing");
+
+        const body = req.body || {};
+        const providerId = Number(body.provider_id);
+        const dateStr = String(body.date || "").trim();
+        const timeStr = String(body.time || "").trim();
+        const endTimeStr = String(body.end_time || "").trim();
+        const isCustom = Number(body.is_custom ?? 0) === 1;
+        const customerId = body.customer_id ? Number(body.customer_id) : null;
+        const customerNote = body.customer_note ?? null;
+
+        if (!providerId) throw httpError(400, "provider_id zorunlu");
+        if (!dateStr || !timeStr) throw httpError(400, "date ve time zorunlu");
+        if (!endTimeStr) throw httpError(400, "end_time zorunlu");
+
+        // Parse times
+        const startAt = toSqlDateTime(dateStr, timeStr);
+        const endAt = toSqlDateTime(dateStr, endTimeStr);
+        if (!startAt || !endAt) throw httpError(400, "Gecersiz date/time");
+
+        const startMin = parseHHMMToMinutes(timeStr);
+        const endMin = parseHHMMToMinutes(endTimeStr);
+        if (startMin === null || endMin === null) throw httpError(400, "Invalid time format");
+        if (endMin <= startMin) throw httpError(400, "Bitis zamani baslangictan once olmali");
+
+        // Validate provider
+        const [pRows] = await pool.execute(
+            `SELECT id, name, provider_type, is_active FROM service_providers WHERE id = ? LIMIT 1`,
+            [providerId]
+        );
+        const provider = pRows[0];
+        if (!provider) throw httpError(404, "Provider not found");
+        if (Number(provider.is_active) === 0) throw httpError(400, "Provider inactive");
+
+        // Validate customer
+        let customer = null;
+        if (customerId) {
+            const [cRows] = await pool.execute(
+                `SELECT id, is_active FROM customers WHERE id = ? LIMIT 1`,
+                [customerId]
+            );
+            customer = cRows[0];
+            if (!customer) throw httpError(404, "Customer not found");
+            if (Number(customer.is_active ?? 1) === 0) throw httpError(403, "Customer inactive");
+
+            const [flagRows] = await pool.execute(
+                `SELECT is_blacklisted FROM customer_flags WHERE customer_id = ? LIMIT 1`,
+                [customerId]
+            );
+            if (flagRows[0]?.is_blacklisted) throw httpError(403, "Customer blacklisted");
+        }
+
+        // Service / custom snapshot fields
+        let serviceIdToInsert = null;
+        let serviceNameSnapshot = "Özel Randevu";
+        let serviceDurationSnapshot = endMin - startMin;
+        let servicePriceSnapshot = null;
+
+        if (!isCustom) {
+            const serviceId = Number(body.service_id);
+            if (!serviceId) throw httpError(400, "service_id zorunlu (standard mode)");
+
+            const [sRows] = await pool.execute(
+                `SELECT id, name, duration_minutes, price, is_active FROM services WHERE id = ? LIMIT 1`,
+                [serviceId]
+            );
+            const svc = sRows[0];
+            if (!svc) throw httpError(404, "Service not found");
+            if (Number(svc.is_active) === 0) throw httpError(400, "Service inactive");
+
+            // Check provider-service relationship
+            const [psRows] = await pool.execute(
+                `SELECT provider_id FROM provider_services WHERE provider_id = ? AND service_id = ? LIMIT 1`,
+                [providerId, serviceId]
+            );
+            if (!psRows.length) throw httpError(400, "Provider does not offer this service");
+
+            serviceIdToInsert = serviceId;
+            serviceNameSnapshot = svc.name;
+            serviceDurationSnapshot = Number(svc.duration_minutes);
+            servicePriceSnapshot = svc.price ?? null;
+        } else {
+            serviceNameSnapshot = String(body.custom_service_name || "Özel Randevu").trim();
+            const customDur = Number(body.custom_duration_minutes);
+            if (!Number.isFinite(customDur) || customDur <= 0) {
+                throw httpError(400, "custom_duration_minutes gecerli olmali");
+            }
+            serviceDurationSnapshot = customDur;
+            if (body.custom_price !== undefined && body.custom_price !== null) {
+                servicePriceSnapshot = Number(body.custom_price);
+            }
+        }
+
+        // Closure check
+        const slotRangeStart = `${dateStr} ${timeStr}:00`;
+        const slotRangeEnd = `${dateStr} ${endTimeStr}:00`;
+        const [clRows] = await pool.execute(
+            `SELECT id FROM closures
+             WHERE status = 'active'
+               AND start_at < ?
+               AND end_at > ?
+               AND (
+                 (scope = 'global' AND provider_id IS NULL) OR
+                 (scope = 'provider' AND provider_id = ?)
+               )
+             LIMIT 1`,
+            [slotRangeEnd, slotRangeStart, providerId]
+        );
+        if (clRows.length) throw httpError(400, "Provider is not available at this time");
+
+        // Conflict check
+        const [confRows] = await pool.execute(
+            `SELECT id FROM appointments
+             WHERE provider_id = ?
+               AND status = 'confirmed'
+               AND start_at < ?
+               AND end_at > ?
+             LIMIT 1`,
+            [providerId, slotRangeEnd, slotRangeStart]
+        );
+        if (confRows.length) throw httpError(409, "This time slot is already booked");
+
+        const blockDurationMin = roundUpToStep(serviceDurationSnapshot, VIRTUAL_SLOT_MINUTES);
+        const slotTimes = buildSlotTimes(dateStr, startMin, blockDurationMin);
+
+        const conn = await pool.getConnection();
+        try {
+            await conn.beginTransaction();
+
+            const [r1] = await conn.execute(
+                `
+                INSERT INTO appointments
+                  (
+                    provider_id, service_id, is_custom, customer_id,
+                    start_at, end_at,
+                    service_name_snapshot, service_duration_minutes_snapshot, service_price_snapshot,
+                    provider_name_snapshot, provider_type_snapshot,
+                    customer_note
+                  )
+                VALUES
+                  (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                `,
+                [
+                    providerId,
+                    serviceIdToInsert,
+                    isCustom ? 1 : 0,
+                    customerId,
+                    startAt,
+                    endAt,
+                    serviceNameSnapshot,
+                    serviceDurationSnapshot,
+                    servicePriceSnapshot,
+                    provider.name,
+                    provider.provider_type,
+                    customerNote
+                ]
+            );
+
+            const appointmentId = r1.insertId;
+
+            // Delete old non-confirmed slots
+            await conn.execute(
+                `DELETE s FROM appointment_slots s
+                 INNER JOIN appointments a ON a.id = s.appointment_id
+                 WHERE s.provider_id = ?
+                   AND s.slot_time >= ?
+                   AND s.slot_time < ?
+                   AND a.status <> 'confirmed'`,
+                [providerId, slotRangeStart, slotRangeEnd]
+            );
+
+            // Insert new 5-min slots
+            if (slotTimes.length > 0) {
+                const slotValues = slotTimes.map(() => "(?, ?, ?)").join(", ");
+                const slotParams = [];
+                for (const t of slotTimes) {
+                    slotParams.push(appointmentId, providerId, t);
+                }
+                await conn.execute(
+                    `INSERT INTO appointment_slots (appointment_id, provider_id, slot_time)
+                     VALUES ${slotValues}`,
+                    slotParams
+                );
+            }
+
+            // Status history
+            await conn.execute(
+                `INSERT INTO appointment_status_history
+                 (appointment_id, old_status, new_status, changed_by, note)
+                 VALUES (?, 'confirmed', 'confirmed', 'staff', ?)`,
+                [appointmentId, null]
+            );
+
+            await conn.commit();
+
+            emitAppointment({
+                appointmentId,
+                providerId,
+                staffId: staffIdFromToken,
+                start_at: startAt,
+                status: "confirmed",
+            });
+
+            return res.status(201).json({ ok: true, appointmentId });
+        } catch (err) {
+            await conn.rollback();
+            if (err && (err.code === "ER_DUP_ENTRY" || err.errno === 1062)) {
+                return res.status(409).json({ ok: false, message: "Slot dolu" });
             }
             throw err;
         } finally {
@@ -3706,6 +4028,7 @@ const ScopedControllers = {
             const id = await Models.customers.create({
                 phone,
                 display_name: displayName,
+                nickname: body.nickname ?? null,
                 is_active: 1
             });
             return res.status(201).json({ ok: true, id });
@@ -3715,6 +4038,38 @@ const ScopedControllers = {
             }
             throw err;
         }
+    }),
+
+    customerUpdate: asyncWrap(async (req, res) => {
+        const { id } = req.params;
+        const body = req.body || {};
+        if (!id) throw httpError(400, "id zorunlu");
+        try {
+            const updated = await Models.customers.update(
+                { id: Number(id) },
+                {
+                    display_name: body.display_name ?? body.displayName ?? null,
+                    nickname: body.nickname ?? null,
+                    phone: body.phone ? String(body.phone).trim() : null,
+                    is_active: body.is_active !== undefined ? (body.is_active ? 1 : 0) : 1,
+                }
+            );
+            if (!updated) return res.status(404).json({ ok: false, message: "Musteri bulunamadi" });
+            return res.json({ ok: true });
+        } catch (err) {
+            if (err && (err.code === "ER_DUP_ENTRY" || err.errno === 1062)) {
+                return res.status(409).json({ ok: false, message: "Bu telefon zaten kayitli" });
+            }
+            throw err;
+        }
+    }),
+
+    customerDelete: asyncWrap(async (req, res) => {
+        const { id } = req.params;
+        if (!id) throw httpError(400, "id zorunlu");
+        const deleted = await Models.customers.remove({ id: Number(id) });
+        if (!deleted) return res.status(404).json({ ok: false, message: "Musteri bulunamadi" });
+        return res.json({ ok: true });
     }),
 
     appointmentsList: asyncWrap(async (req, res) => {
@@ -3890,8 +4245,8 @@ const ScopedControllers = {
 
             const [result] = await conn.execute(
                 `INSERT INTO closures
-                 (scope, provider_id, start_at, end_at, is_all_day, status, reason, note, created_by)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 (scope, provider_id, start_at, end_at, is_all_day, status, reason, note)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     scope,
                     scope === 'global' ? null : providerId,
@@ -3900,8 +4255,7 @@ const ScopedControllers = {
                     isAllDay,
                     status,
                     reason,
-                    note,
-                    decoded.sub
+                    note
                 ]
             );
             const closureId = result.insertId ?? null;
@@ -4555,7 +4909,7 @@ const ScopedControllers = {
         const timeStr = t.formatTime(startDt);
 
         // Hatırlatma mesajı oluştur
-        const msg = `Merhaba ${appt.customer_name || "Musteri"}, randevunuz ${dateStr} tarihinde ${timeStr} saatinde ${appt.service_name || "hizmet"} icin hatirlatilir. Sagliklar!`;
+        const msg = `Ercan İncirkuş Berber Dükkanı - Merhaba ${appt.customer_name || "Musteri"}, randevunuz ${dateStr} tarihinde ${timeStr} saatinde ${appt.service_name || "hizmet"} icin hatirlatilir. Sagliklar!`;
 
         try {
             await sendSms({
@@ -4676,7 +5030,8 @@ const ScopedControllers = {
         if (!psRows.length) throw httpError(404, "Period setting not found");
 
         const ps = psRows[0];
-        const currentData = JSON.parse(ps.data_json || "{}");
+        const rawDataJson = ps.data_json;
+        const currentData = typeof rawDataJson === 'string' ? JSON.parse(rawDataJson || "{}") : (rawDataJson || {});
         const currentSettings = currentData.settings || {};
 
         // Eski ve yeni saatleri karşılaştır

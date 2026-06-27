@@ -1,8 +1,5 @@
 // app.js
-// Only load dotenv if no DB_NAME is set (avoid double-loading issues)
-if (!process.env.DB_NAME) {
-  require("dotenv").config();
-}
+require("dotenv").config();
 const express = require("express");
 const path = require("path");
 const router = require("./router.js");
@@ -28,12 +25,23 @@ const allowedOrigins = [
     "http://localhost:5500",
 ];
 
-app.use(
-    cors({
-        origin: allowedOrigins,
-        credentials: true,
-    })
-);
+const isDevelopment =
+    String(process.env.NODE_ENV || "").toLowerCase() === "development";
+
+console.log("🔍 NODE_ENV:", process.env.NODE_ENV, "→ isDevelopment:", isDevelopment);
+
+if (isDevelopment) {
+    app.use(cors({
+        origin: (origin, callback) => {
+            // Development'ta tüm origin'lere izin ver (origin yoksa da)
+            callback(null, true);
+        },
+        credentials: true
+    }));
+    console.log("🔧 Development mode: CORS open (dynamic origin)");
+} else {
+    app.use(cors({ origin: allowedOrigins, credentials: true }));
+}
 
 app.use(cookieParser());
 

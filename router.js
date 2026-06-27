@@ -54,6 +54,7 @@ router.get("/appointments/panel/:id", BookingControllers.panelGetById);
 router.post("/appointments/panel/create", BookingControllers.panelCreate);
 router.post("/appointments/panel/create-direct", BookingControllers.panelCreateDirect);
 router.post("/appointments/panel/book-quick", BookingControllers.panelBookQuick);
+router.post("/appointments/custom", BookingControllers.createCustom);
 router.post("/appointments/panel/status", BookingControllers.panelSetStatus);
 router.patch("/appointments/:id/status", BookingControllers.updateStatus);
 router.put("/appointments/:id", BookingControllers.appointmentUpdate);
@@ -91,6 +92,8 @@ router.post("/staff_services/assign", ScopedControllers.staffServicesAssign);
 router.post("/staff_services/unassign", ScopedControllers.staffServicesUnassign);
 
 router.post("/customers", ScopedControllers.customerCreate);
+router.put("/customers/:id", ScopedControllers.customerUpdate);
+router.delete("/customers/:id", ScopedControllers.customerDelete);
 router.get("/appointments", ScopedControllers.appointmentsList);
 
 // closures -> branch_closures (personal_db)
