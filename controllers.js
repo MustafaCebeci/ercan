@@ -2662,20 +2662,6 @@ const BookingControllers = {
             if (!psRows.length) throw httpError(400, "Provider does not provide this service");
         }
 
-        // Mevcut appointment kontrolu (cakisma)
-        const [confRows] = await pool.execute(
-            `SELECT id FROM appointments
-             WHERE provider_id = ?
-               AND status = 'confirmed'
-               AND start_at < ?
-               AND end_at > ?
-             LIMIT 1`,
-            [provider.id, slotRangeEnd, slotRangeStart]
-        );
-        if (confRows.length) {
-            throw httpError(409, "This time slot is already booked");
-        }
-
         // Customer dogrula
         const [cRows] = await pool.execute(
             `SELECT id, is_active FROM customers WHERE id = ? LIMIT 1`,
@@ -2776,12 +2762,6 @@ const BookingControllers = {
             return res.status(201).json({ ok: true, appointmentId });
         } catch (err) {
             await conn.rollback();
-            if (err && (err.code === "ER_DUP_ENTRY" || err.errno === 1062)) {
-                return res.status(409).json({
-                    ok: false,
-                    message: "Bu randevu zaten mevcut"
-                });
-            }
             throw err;
         } finally {
             conn.release();
@@ -2912,18 +2892,6 @@ const BookingControllers = {
         );
         if (clRows.length) throw httpError(400, "Provider is not available at this time");
 
-        // Conflict check
-        const [confRows] = await pool.execute(
-            `SELECT id FROM appointments
-             WHERE provider_id = ?
-               AND status = 'confirmed'
-               AND start_at < ?
-               AND end_at > ?
-             LIMIT 1`,
-            [providerId, slotRangeEnd, slotRangeStart]
-        );
-        if (confRows.length) throw httpError(409, "This time slot is already booked");
-
         const blockDurationMin = roundUpToStep(serviceDurationSnapshot, VIRTUAL_SLOT_MINUTES);
         const slotTimes = buildSlotTimes(dateStr, startMin, blockDurationMin);
 
@@ -3008,9 +2976,6 @@ const BookingControllers = {
             return res.status(201).json({ ok: true, appointmentId });
         } catch (err) {
             await conn.rollback();
-            if (err && (err.code === "ER_DUP_ENTRY" || err.errno === 1062)) {
-                return res.status(409).json({ ok: false, message: "Slot dolu" });
-            }
             throw err;
         } finally {
             conn.release();
