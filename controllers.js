@@ -1030,7 +1030,7 @@ const BookingControllers = {
                         customerPhone = cRows[0]?.phone ?? null;
                     }
                     if (customerPhone) {
-                        const msg = `Ercan İncirkuş Berber Dükkanı - Randevunuz olusturuldu. Tarih: ${dateStr} ${timeStr}. Hizmet: ${svc.name}.`;
+                        const msg = `Ahmet Şanlı Hair Salon - Randevunuz olusturuldu. Tarih: ${dateStr} ${timeStr}. Hizmet: ${svc.name}.`;
                         await sendSms({
                             appointment_id: appointmentId,
                             phone: customerPhone,
@@ -1053,7 +1053,7 @@ const BookingControllers = {
                     );
                     const staffPhone = staffRows[0]?.phone ?? null;
                     if (staffPhone) {
-                        const msg = `Ercan İncirkuş Berber Dükkanı - Yeni randevu: ${svc.name}, ${dateStr} ${timeStr}.`;
+                        const msg = `Ahmet Şanlı Hair Salon - Yeni randevu: ${svc.name}, ${dateStr} ${timeStr}.`;
                         await sendSms({
                             appointment_id: appointmentId,
                             phone: staffPhone,
@@ -1874,7 +1874,7 @@ const BookingControllers = {
                     if (customer?.phone) {
                         const oldTime = t.formatDateTime(ap.start_at);
                         const newTime = t.formatDateTime(startAt);
-                        const msg = `Ercan İncirkuş Berber Dükkanı - Randevunuz ${oldTime} yerine ${newTime} saatine taşınmıştır. Saygılarımızla.`;
+                        const msg = `Ahmet Şanlı Hair Salon - Randevunuz ${oldTime} yerine ${newTime} saatine taşınmıştır. Saygılarımızla.`;
                         await sendSms({ phone: customer.phone, message: msg, type: "general" });
                     }
                 } catch (smsErr) {
@@ -2039,7 +2039,7 @@ const BookingControllers = {
         const searchTerm = `%${q}%`;
         const safeLimit = parseInt(limit, 10) || 50;
         const [rows] = await pool.query(
-            `SELECT id, phone, display_name, is_active, created_at
+            `SELECT id, phone, display_name, nickname, is_active, created_at
              FROM customers
              WHERE is_active = 1
                AND (phone LIKE ? OR display_name LIKE ?)
@@ -2660,23 +2660,6 @@ const BookingControllers = {
                 [provider.id, serviceId]
             );
             if (!psRows.length) throw httpError(400, "Provider does not provide this service");
-        }
-
-        // Closure kontrolu
-        const [clRows] = await pool.execute(
-            `SELECT id FROM closures
-             WHERE status = 'active'
-               AND start_at < ?
-               AND end_at > ?
-               AND (
-                 (scope = 'global' AND provider_id IS NULL) OR
-                 (scope = 'provider' AND provider_id = ?)
-               )
-             LIMIT 1`,
-            [slotRangeEnd, slotRangeStart, provider.id]
-        );
-        if (clRows.length) {
-            throw httpError(400, "Provider is not available at the selected time");
         }
 
         // Mevcut appointment kontrolu (cakisma)
@@ -4525,6 +4508,7 @@ const ScopedControllers = {
             payload.price = body.price;
         }
         if (body.is_active !== undefined) payload.is_active = body.is_active ? 1 : 0;
+        if (body.sound_id !== undefined) payload.sound_id = body.sound_id;
 
         const ok = await Models.services.update({ id }, payload);
         if (!ok) return res.status(404).json({ ok: false, message: "Not found" });
@@ -4909,7 +4893,7 @@ const ScopedControllers = {
         const timeStr = t.formatTime(startDt);
 
         // Hatırlatma mesajı oluştur
-        const msg = `Ercan İncirkuş Berber Dükkanı - Merhaba ${appt.customer_name || "Musteri"}, randevunuz ${dateStr} tarihinde ${timeStr} saatinde ${appt.service_name || "hizmet"} icin hatirlatilir. Sagliklar!`;
+        const msg = `Ahmet Şanlı Hair Salon - Merhaba ${appt.customer_name || "Musteri"}, randevunuz ${dateStr} tarihinde ${timeStr} saatinde ${appt.service_name || "hizmet"} icin hatirlatilir. Sagliklar!`;
 
         try {
             await sendSms({
@@ -5331,6 +5315,29 @@ const ScopedControllers = {
         const item = await Models.provider_static_slots.get({ id });
         if (!item) return res.status(404).json({ ok: false, message: "Not found" });
         return res.json({ ok: true, item });
+    }),
+
+    servicesGet: asyncWrap(async (req, res) => {
+        const { id } = req.params;
+        const businessId = getPersonalBusinessId();
+        const [rows] = await pool.execute(
+            `SELECT sv.*, ? AS business_id FROM services sv WHERE sv.id = ?`,
+            [businessId, id]
+        );
+        if (!rows.length) return res.status(404).json({ ok: false, message: "Service not found" });
+        return res.json({ ok: true, item: rows[0] });
+    }),
+
+    soundsList: asyncWrap(async (req, res) => {
+        const [rows] = await pool.execute(`SELECT * FROM sounds ORDER BY id DESC`);
+        return res.json({ ok: true, items: rows });
+    }),
+
+    soundsGet: asyncWrap(async (req, res) => {
+        const { id } = req.params;
+        const [rows] = await pool.execute(`SELECT * FROM sounds WHERE id = ? LIMIT 1`, [id]);
+        if (!rows.length) return res.status(404).json({ ok: false, message: "Sound not found" });
+        return res.json({ ok: true, item: rows[0] });
     }),
 };
 

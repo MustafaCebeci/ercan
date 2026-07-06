@@ -79,6 +79,9 @@ router.get("/branches/current", ScopedControllers.branchesCurrent);
 router.get("/branches/:id", ScopedControllers.branchesGet);
 router.get("/staff", ScopedControllers.staffList);
 router.get("/services", ScopedControllers.servicesList);
+router.get("/services/:id", ScopedControllers.servicesGet);
+router.get("/sounds", ScopedControllers.soundsList);
+router.get("/sounds/:id", ScopedControllers.soundsGet);
 
 // staff_services -> provider_services (personal_db)
 router.get("/provider_services", ScopedControllers.staffServicesList);

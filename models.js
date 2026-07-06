@@ -174,7 +174,7 @@ const Models = {
     services: createCrudModel({
         table: "services",
         pk: "id",
-        columns: ["id", "name", "duration_minutes", "price", "is_active", "created_at", "updated_at"],
+        columns: ["id", "name", "duration_minutes", "price", "sound_id", "is_active", "created_at", "updated_at"],
     }),
 
     staff: createCrudModel({
