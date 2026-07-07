@@ -10,11 +10,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('../../config.js', () => ({
   env: vi.fn((key, fallback) => {
     const envMap = {
-      'SMS_USER': 'testuser',
-      'SMS_PASS': 'testpass',
-      'SMS_BASLIK': 'TEST',
-      'SMS_ENDPOINT': 'https://test.api.mesajpaneli.com',
-      'SMS_VERIFY_SSL': 'false',
+      'NETGSM_USER': 'testuser',
+      'NETGSM_PASS': 'testpass',
+      'NETGSM_HEADER': 'TEST',
+      'NETGSM_ENDPOINT': 'https://test.api.netgsm.com.tr',
+      'NETGSM_VERIFY_SSL': 'false',
       'GMAIL_USER': 'test@gmail.com',
       'GMAIL_PASS': 'testpassword',
     };
@@ -25,13 +25,13 @@ vi.mock('../../config.js', () => ({
   }),
 }));
 
-// Mock MesajPaneliApi
-vi.mock('../../MesajPaneliApi.js', () => ({
-  CredentialsUsernamePassword: vi.fn().mockImplementation(() => ({})),
-  TopluMesaj: vi.fn().mockImplementation((metin, telefon) => ({ metin, telefon })),
-  MesajPaneliApi: vi.fn().mockImplementation(() => ({
+// Mock sms.provider
+vi.mock('../../sms.provider.js', () => ({
+  createSmsProvider: vi.fn().mockImplementation(() => ({
     topluMesajGonder: vi.fn().mockResolvedValue({ status: true, msg_id: 'mock-123' }),
+    getProviderName: vi.fn().mockReturnValue('netgsm'),
   })),
+  TopluMesaj: vi.fn().mockImplementation((metin, telefon) => ({ metin, telefon })),
 }));
 
 // Mock models (pool)
@@ -183,7 +183,7 @@ describe('logSmsToDb()', () => {
       to_phone: '5467473915',
       body: 'Test message',
       type: 'otp',
-      provider: 'mesajpaneli',
+      provider: 'netgsm',
       status: 'sent',
       provider_msg_id: 'msg-123',
     });
@@ -216,7 +216,7 @@ describe('sendSms()', () => {
     vi.clearAllMocks();
   });
 
-  it('sends SMS via MesajPaneliApi', async () => {
+  it('sends SMS via NetGSM', async () => {
     const result = await notificationService.sendSms({
       phone: '5467473915',
       message: 'Test message',
@@ -241,9 +241,10 @@ describe('sendSms()', () => {
   });
 
   it('throws and logs on SMS API error', async () => {
-    const { MesajPaneliApi } = require('../../MesajPaneliApi.js');
-    MesajPaneliApi.mockImplementation(() => ({
+    const { createSmsProvider } = require('../../sms.provider.js');
+    createSmsProvider.mockImplementation(() => ({
       topluMesajGonder: vi.fn().mockRejectedValue(new Error('API Error')),
+      getProviderName: vi.fn().mockReturnValue('netgsm'),
     }));
 
     pool.execute.mockResolvedValue([{ affectedRows: 1 }]);

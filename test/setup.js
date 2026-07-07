@@ -8,11 +8,11 @@ process.env.CRON_SECRET = 'test-cron-secret';
 process.env.BUSINESS_TIMEZONE = 'Europe/Istanbul';
 process.env.PERSONAL_BUSINESS_ID = '1';
 process.env.PERSONAL_BRANCH_ID = '1';
-process.env.SMS_USER = 'test';
-process.env.SMS_PASS = 'test';
-process.env.SMS_BASLIK = 'TEST';
-process.env.SMS_ENDPOINT = 'https://test.api.mesajpaneli.com';
-process.env.SMS_VERIFY_SSL = 'false';
+process.env.NETGSM_USER = 'test';
+process.env.NETGSM_PASS = 'test';
+process.env.NETGSM_HEADER = 'TEST';
+process.env.NETGSM_ENDPOINT = 'https://test.api.netgsm.com.tr';
+process.env.NETGSM_VERIFY_SSL = 'false';
 
 // Increase timeout for CI environments
 if (process.env.CI) {

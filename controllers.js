@@ -1030,7 +1030,7 @@ const BookingControllers = {
                         customerPhone = cRows[0]?.phone ?? null;
                     }
                     if (customerPhone) {
-                        const msg = `Ahmet Şanlı Hair Salon - Randevunuz olusturuldu. Tarih: ${dateStr} ${timeStr}. Hizmet: ${svc.name}.`;
+                        const msg = `Ercan İncirkuş Berber Dükkanı - Randevunuz olusturuldu. Tarih: ${dateStr} ${timeStr}. Hizmet: ${svc.name}.`;
                         await sendSms({
                             appointment_id: appointmentId,
                             phone: customerPhone,
@@ -1053,7 +1053,7 @@ const BookingControllers = {
                     );
                     const staffPhone = staffRows[0]?.phone ?? null;
                     if (staffPhone) {
-                        const msg = `Ahmet Şanlı Hair Salon - Yeni randevu: ${svc.name}, ${dateStr} ${timeStr}.`;
+                        const msg = `Ercan İncirkuş Berber Dükkanı - Yeni randevu: ${svc.name}, ${dateStr} ${timeStr}.`;
                         await sendSms({
                             appointment_id: appointmentId,
                             phone: staffPhone,
@@ -1874,7 +1874,7 @@ const BookingControllers = {
                     if (customer?.phone) {
                         const oldTime = t.formatDateTime(ap.start_at);
                         const newTime = t.formatDateTime(startAt);
-                        const msg = `Ahmet Şanlı Hair Salon - Randevunuz ${oldTime} yerine ${newTime} saatine taşınmıştır. Saygılarımızla.`;
+                        const msg = `Ercan İncirkuş Berber Dükkanı - Randevunuz ${oldTime} yerine ${newTime} saatine taşınmıştır. Saygılarımızla.`;
                         await sendSms({ phone: customer.phone, message: msg, type: "general" });
                     }
                 } catch (smsErr) {
@@ -4858,7 +4858,7 @@ const ScopedControllers = {
         const timeStr = t.formatTime(startDt);
 
         // Hatırlatma mesajı oluştur
-        const msg = `Ahmet Şanlı Hair Salon - Merhaba ${appt.customer_name || "Musteri"}, randevunuz ${dateStr} tarihinde ${timeStr} saatinde ${appt.service_name || "hizmet"} icin hatirlatilir. Sagliklar!`;
+        const msg = `Ercan İncirkuş Berber Dükkanı - Merhaba ${appt.customer_name || "Musteri"}, randevunuz ${dateStr} tarihinde ${timeStr} saatinde ${appt.service_name || "hizmet"} icin hatirlatilir. Sagliklar!`;
 
         try {
             await sendSms({

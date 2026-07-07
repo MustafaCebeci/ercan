@@ -4,12 +4,8 @@ const { pool } = require("./models");
 const t = require("./temporal_api.utils");
 const { getMailer, env } = require("./config");
 
-// SMS Provider (MesajPaneli)
-const {
-    CredentialsUsernamePassword,
-    MesajPaneliApi,
-    TopluMesaj,
-} = require("./MesajPaneliApi.js");
+// SMS Provider (NetGSM)
+const { createSmsProvider, TopluMesaj } = require("./sms.provider.js");
 
 // --- OTP yardımcıları ---
 function generateOtpCode() {
@@ -21,7 +17,7 @@ function sha256(input) {
 }
 
 function otpMessage(code) {
-    return `Giriş kodun: ${code}. Bu kod 1 dakika geçerlidir.`;
+    return `Giriş kodunuz: ${code}. Bu kod 1 dakika geçerlidir.- Ercan İncirkuş Berber Dükkanı`;
 }
 
 /**
@@ -83,7 +79,7 @@ async function logSmsToDb({
     to_phone,
     body,
     type = "otp",
-    provider = "mesajpaneli",
+    provider = "netgsm",
     status = "sent",
     provider_msg_id = null,
     error_message = null,
@@ -117,34 +113,22 @@ async function sendMail({ to, subject, text }) {
 }
 
 /**
- * SMS API instance (paket kullanım stiliyle)
+ * SMS API instance (NetGSM)
  */
 function createSmsApi() {
-    const user = env("SMS_USER", "");
-    const pass = env("SMS_PASS", "");
-    const endpoint = env("SMS_ENDPOINT", "https://api.mesajpaneli.com/json_api/api");
-
-    // Sertifika hatası alırsan env: SMS_VERIFY_SSL=false
-    const verifySSL = String(env("SMS_VERIFY_SSL", "true")).toLowerCase() !== "false";
-
-    const credentials = new CredentialsUsernamePassword(user, pass);
-
-    return new MesajPaneliApi(credentials, {
-        endpoint,
-        verifySSL,
-        timeout: 50_000,
-    });
+    return createSmsProvider();
 }
 
 /**
  * SMS gönder (GERÇEK)
- * - MesajPaneliApi + TopluMesaj kullanım stili
+ * - NetGSM üzerinden gönderir
  * - sms_messages loglar
  */
 async function sendSms({ appointment_id = null, phone, message, type = "otp", source = "system" }) {
     const smsApi = createSmsApi();
+    const providerName = smsApi.getProviderName();
 
-    const baslik = env("SMS_BASLIK", "TBS AV.ORT.");
+    const baslik = env("NETGSM_HEADER", "");
 
     // "05xxxxxxxxx" veya "5xxxxxxxxx" formatı sende nasıl ise onu gönder.
     // Senin örnek: 5467473915 (başında 0 yok) -> aynen geçiyoruz.
@@ -162,7 +146,7 @@ async function sendSms({ appointment_id = null, phone, message, type = "otp", so
             to_phone: phone,
             body: message,
             type,
-            provider: "mesajpaneli",
+            provider: providerName,
             status: "sent",
             provider_msg_id: providerMsgId,
             error_message: null,
@@ -178,7 +162,7 @@ async function sendSms({ appointment_id = null, phone, message, type = "otp", so
             to_phone: phone,
             body: message,
             type,
-            provider: "mesajpaneli",
+            provider: providerName,
             status: "failed",
             provider_msg_id: null,
             error_message: errText,
@@ -265,7 +249,7 @@ async function sendCancellationSms(appointment, closureStart, closureEnd) {
     const customerName = appointment.customer_name || 'musterimiz';
     const startTime = closureStart?.slice(11, 16) || '09:00';
     const endTime = closureEnd?.slice(11, 16) || '18:00';
-    const message = `Sayın ${customerName}, randevu aldığınız personelimiz ${startTime} - ${endTime} saatleri arasında çalışmayacaktır. Daha sonrası için randevu alabilir, detaylı bilgi için işletmemizle iletişime geçebilirsiniz. İyi günler dileriz.`;
+    const message = `Ercan İncirkuş Berber Dükkanı - Sayın ${customerName}, randevu aldığınız personelimiz ${startTime} - ${endTime} saatleri arasında çalışmayacaktır. Daha sonrası için randevu alabilir, detaylı bilgi için işletmemizle iletişime geçebilirsiniz. İyi günler dileriz.`;
     await sendSms({
         appointment_id: appointment.id,
         phone: appointment.customer_phone,

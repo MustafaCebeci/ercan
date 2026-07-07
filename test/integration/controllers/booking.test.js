@@ -24,9 +24,9 @@ vi.mock('../../config.js', () => ({
       'BUSINESS_TIMEZONE': 'Europe/Istanbul',
       'PERSONAL_BUSINESS_ID': '1',
       'PERSONAL_BRANCH_ID': '1',
-      'SMS_USER': 'test',
-      'SMS_PASS': 'test',
-      'SMS_BASLIK': 'TEST',
+      'NETGSM_USER': 'test',
+      'NETGSM_PASS': 'test',
+      'NETGSM_HEADER': 'TEST',
     };
     return map[key] ?? fallback;
   }),

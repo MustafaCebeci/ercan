@@ -11,7 +11,7 @@ const cookieParser = require("cookie-parser");
 const jwt = require("jsonwebtoken");
 const { pool } = require("./models");
 const t = require("./temporal_api.utils");
-// scheduler.js artık harici cronjob manager tarafından tetikleniyor
+const { startScheduler } = require("./cron");
 const { logRequest } = require("./logger.js");
 
 const app = express();
@@ -214,6 +214,9 @@ app.use((err, req, res, next) => {
         message: err.message || "Server error",
     });
 });
+
+// -------- Scheduler --------
+startScheduler();
 
 // -------- Server --------
 const PORT = Number(process.env.PORT || 3000);

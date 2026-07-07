@@ -186,7 +186,7 @@ async function sendReminders() {
         // Hatırlatma süresine göre randevuları bul
         console.log(`[SCHEDULER] Hatırlatma kontrolü: ${reminderHours} saat öncesi`);
         const [rows] = await pool.execute(`
-            SELECT a.id, a.start_at, c.phone, c.name
+            SELECT a.id, a.start_at, c.phone, c.display_name
             FROM appointments a
             JOIN customers c ON a.customer_id = c.id
             WHERE a.status = 'confirmed'
@@ -201,6 +201,12 @@ async function sendReminders() {
         console.log(`[SCHEDULER] ${rows.length} randevu için hatırlatma kontrolü`);
 
         for (const appt of rows) {
+            // Phone yoksa atla
+            if (!appt.phone) {
+                console.log(`[SCHEDULER] Randevu ${appt.id} için telefon yok, atlanıyor`);
+                continue;
+            }
+
             // Daha önce hatırlatma gönderilmiş mi?
             const [sent] = await pool.execute(`
                 SELECT id FROM sms_messages
@@ -214,7 +220,7 @@ async function sendReminders() {
 
             // SMS mesajı oluştur
             const timeStr = t.formatDateTime(appt.start_at);
-            const message = `Merhabo ${appt.name}, ${timeStr} randeviniz hatırlatmak isteriz. Gelemeyecekseniz lütfen iptal edin.`;
+            const message = `Merhaba ${appt.display_name}, ${timeStr} randevunuzu hatırlatmak isteriz. - Ercan İncirkuş Berber Dükkanı`;
 
             try {
                 await sendSms({

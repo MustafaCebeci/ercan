@@ -16,7 +16,7 @@ export const mockSendSms = vi.fn().mockImplementation(async ({ appointment_id, p
   // Log the SMS for test assertions
   sentSmsLog.push({ appointment_id, phone, message, type, timestamp: Date.now() });
 
-  // Return a successful response similar to MesajPaneliApi
+  // Return a successful response similar to NetGSM
   return {
     status: true,
     msg_id: `mock-msg-${Date.now()}`,
