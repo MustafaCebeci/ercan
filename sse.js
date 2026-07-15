@@ -65,13 +65,16 @@ function emitAppointment(payload) {
 function desktopSseHandler(req, res) {
   // Header-based secret auth (CORS değil — native desktop app için)
   const secret = process.env.DESKTOP_EVENTS_SECRET;
+  console.log("[DesktopSSE] Incoming request headers:", JSON.stringify(req.headers));
+  console.log("[DesktopSSE] Expected secret:", secret, "| Received:", req.headers["x-desktop-secret"]);
   if (secret && req.headers["x-desktop-secret"] !== secret) {
+    console.log("[DesktopSSE] Unauthorized — secret mismatch");
     res.writeHead(401, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: false, message: "Unauthorized" }));
     return;
   }
 
-  console.log("[DesktopSSE] New connection");
+  console.log("[DesktopSSE] Auth OK — New connection");
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
