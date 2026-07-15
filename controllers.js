@@ -944,7 +944,7 @@ const BookingControllers = {
               customer_note
             )
           VALUES
-            (?, ?, ?, 'customer', ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, 'customer', ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?, ?)
         `,
                 // end_at expr: DATE_ADD(start_at, durationMin)
                 [
