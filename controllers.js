@@ -933,37 +933,59 @@ const BookingControllers = {
             await conn.beginTransaction();
 
             // 1) appointments insert
-            const [r1] = await conn.execute(
-                `
-          INSERT INTO appointments
-            (
-              provider_id, service_id, is_custom, source, customer_id,
-              start_at, end_at,
-              service_name_snapshot, service_duration_minutes_snapshot, service_price_snapshot,
-              provider_name_snapshot, provider_type_snapshot,
-              customer_note
-            )
-          VALUES
-            (?, ?, ?, 'customer', ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?, ?)
-            VALUES
-        `,
-                // end_at expr: DATE_ADD(start_at, durationMin)
-                [
-                    provider.id,     // provider_id
-                    serviceId,      // service_id
-                    0,              // is_custom
-                    customerId,      // customer_id
-                    startAt,         // start_at
-                    startAt,         // DATE_ADD start
-                    isCustom ? durationMin : svc.duration_minutes, // DATE_ADD interval
-                    isCustom ? (body.custom_service_name ?? "Özel Randevu") : svc.name, // service_name_snapshot
-                    isCustom ? durationMin : svc.duration_minutes, // service_duration_minutes_snapshot
-                    effectivePrice,  // service_price_snapshot
-                    provider.name,   // provider_name_snapshot
-                    provider.provider_type, // provider_type_snapshot
-                    customerNote     // customer_note
-                ]
-            );
+            const endAtSqlExpr = `DATE_ADD(?, INTERVAL ? MINUTE)`;
+
+const [r1] = await conn.execute(
+`
+INSERT INTO appointments
+(
+    provider_id,
+    service_id,
+    is_custom,
+    source,
+    customer_id,
+    start_at,
+    end_at,
+    service_name_snapshot,
+    service_duration_minutes_snapshot,
+    service_price_snapshot,
+    provider_name_snapshot,
+    provider_type_snapshot,
+    customer_note
+)
+VALUES
+(
+    ?, ?, ?, 'customer', ?,
+    ?,
+    ${endAtSqlExpr},
+    ?, ?, ?, ?, ?, ?
+)
+`,
+[
+    provider.id,
+    serviceId,
+    isCustom ? 1 : 0,
+    customerId,
+
+    startAt,     // start_at
+
+    startAt,     // DATE_ADD başlangıcı
+    durationMin, // dakika
+
+    isCustom
+        ? (body.custom_service_name ?? "Özel Randevu")
+        : svc.name,
+
+    durationMin,
+
+    effectivePrice,
+
+    provider.name,
+
+    provider.provider_type,
+
+    customerNote
+]);
 
             const appointmentId = r1.insertId;
 
