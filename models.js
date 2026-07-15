@@ -341,6 +341,16 @@ const Models = {
         pk: "id",
         columns: ["id", "provider_id", "start_time", "end_time", "is_active", "created_at", "updated_at"],
     }),
+
+    reserved_slots: createCrudModel({
+        table: "reserved_slots",
+        pk: "id",
+        columns: [
+            "id", "provider_id", "customer_id", "day_of_week",
+            "start_time", "end_time", "recurrence_weeks",
+            "beginning", "is_active", "note", "created_at", "updated_at"
+        ],
+    }),
 };
 
 module.exports = { pool, Models };

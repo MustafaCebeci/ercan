@@ -67,6 +67,7 @@ function generateSlotsV2Engine(input) {
         closures = [],
         breakRules = [],
         staticSlots = [],
+        reservedSlots = [],
         isToday = false,
         currentMinute = null,
         settings = {},
@@ -118,6 +119,19 @@ function generateSlotsV2Engine(input) {
         }
     }
 
+    // Add reserved slots
+    for (const rs of reservedSlots) {
+        const startMin = parseHHMM(rs.start);
+        const endMin = parseHHMM(rs.end);
+        if (endMin > startMin) {
+            busyIntervals.push({
+                start: startMin,
+                end: endMin,
+                type: 'reserved'
+            });
+        }
+    }
+
     // ====== STEP 2: Merge Overlapping Intervals ======
     // Sort by start time
     const sorted = [...busyIntervals].sort((a, b) => a.start - b.start);
@@ -130,8 +144,8 @@ function generateSlotsV2Engine(input) {
         } else {
             // Overlapping - extend the previous interval
             merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, iv.end);
-            // Keep the more restrictive type (closure > break > appointment)
-            const typePriority = { closure: 3, break: 2, appointment: 1 };
+            // Keep the more restrictive type (closure > reserved > break > appointment)
+            const typePriority = { closure: 4, reserved: 3, break: 2, appointment: 1 };
             if ((typePriority[iv.type] || 0) > (typePriority[merged[merged.length - 1].type] || 0)) {
                 merged[merged.length - 1].type = iv.type;
             }
@@ -209,7 +223,7 @@ function generateSlotsV2Engine(input) {
             }
         } else if (segmentType === 'appointment') {
             status = 'busy';
-        } else if (segmentType === 'closure' || segmentType === 'break') {
+        } else if (segmentType === 'closure' || segmentType === 'reserved' || segmentType === 'break') {
             status = 'closed';
         } else {
             // Empty segment - check if service fits

@@ -20,6 +20,8 @@ const routes = {
     "/randevu/new": "randevu/new.html",
     "/aydinlatma": "aydinlatma.html",
     "/gizlilik": "gizlilik.html",
+    "/monitor": "monitor.html",
+    "/timeline": "timeline.html"
 };
 
 Object.entries(routes).forEach(([route, file]) => {

@@ -3,7 +3,7 @@ const { Models, pool } = require("./models");
 const t = require("./temporal_api.utils");
 const jwt = require("jsonwebtoken");
 const { sendOtp, verifyOtp, sendSms, sendCancellationSms } = require("./notification.service.js");
-const { emitAppointment } = require("./sse");
+const { emitAppointment, emitDesktopEvent } = require("./sse");
 
 // --------------- Helpers ---------------
 function httpError(status, message) {
@@ -937,30 +937,29 @@ const BookingControllers = {
                 `
           INSERT INTO appointments
             (
-              provider_id, service_id, is_custom, customer_id,
+              provider_id, service_id, is_custom, source, customer_id,
               start_at, end_at,
-              service_name_snapshot, service_duration_minutes_snapshot, service_price_snapshot,
+              service_duration_minutes_snapshot, service_name_snapshot, service_price_snapshot,
               provider_name_snapshot, provider_type_snapshot,
               customer_note
             )
           VALUES
-            (?, ?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, 'customer', ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
         `,
                 // end_at expr: DATE_ADD(start_at, durationMin)
                 [
-                    provider.id,
-                    serviceId,
-                    0,
-                    customerId,
-                    startAt,
-                    startAt,
-                    isCustom ? durationMin : svc.duration_minutes,
-                    isCustom ? (body.custom_service_name ?? "Özel Randevu") : svc.name,
-                    isCustom ? durationMin : svc.duration_minutes,
-                    effectivePrice,
-                    provider.name,
-                    provider.provider_type,
-                    customerNote
+                    provider.id,     // provider_id
+                    serviceId,      // service_id
+                    0,              // is_custom
+                    customerId,      // source = 'customer'
+                    startAt,         // start_at
+                    startAt,         // DATE_ADD start
+                    isCustom ? durationMin : svc.duration_minutes, // DATE_ADD interval = service_duration_minutes_snapshot
+                    isCustom ? (body.custom_service_name ?? "Özel Randevu") : svc.name, // service_name_snapshot
+                    effectivePrice,  // service_price_snapshot
+                    provider.name,   // provider_name_snapshot
+                    provider.provider_type, // provider_type_snapshot
+                    customerNote     // customer_note
                 ]
             );
 
@@ -1017,6 +1016,9 @@ const BookingControllers = {
                 start_at: startAt,
                 status: "confirmed",
             });
+
+            // Desktop SSE — yeni randevu oluştu
+            emitDesktopEvent("command", "print.appointment", { appointmentId, date: startAt });
 
             try {
                 const smsEnabled = settingsJson.sms_reminder !== false;
@@ -1700,6 +1702,10 @@ const BookingControllers = {
                 start_at: ap.start_at,
                 status,
             });
+
+            // Desktop SSE — randevu güncellendi (yeniden yazdır)
+            emitDesktopEvent("command", "print.appointment", { appointmentId, date: ap.start_at });
+
             return res.json({ ok: true, status });
         } catch (err) {
             await conn.rollback();
@@ -1889,6 +1895,7 @@ const BookingControllers = {
                 start_at: startAt,
                 status: ap.status,
             });
+            emitDesktopEvent("command", "print.appointment", { appointmentId, date: startAt });
 
             return res.json({ ok: true });
         } catch (err) {
@@ -2137,6 +2144,247 @@ const BookingControllers = {
     }),
 
     /**
+     * POST /api/appointments/monthly-occupancy
+     * Body: { year, month }
+     * Ayın her günü için doluluk bilgisi döndürür (HH:MM formatı için dakika bazlı).
+     */
+    monthlyOccupancy: asyncWrap(async (req, res) => {
+        const body = req.body || {};
+        const year = Number(body.year);
+        const month = Number(body.month);
+        if (!year || !month || month < 1 || month > 12) {
+            throw httpError(400, "year ve month zorunlu");
+        }
+
+        const lastDay = t.lastDayOfMonth(year, month);
+        const mm = String(month).padStart(2, "0");
+        const startAt = `${year}-${mm}-01 00:00:00`;
+        const endAt = `${year}-${mm}-${String(lastDay).padStart(2, "0")} 23:59:59`;
+
+        if (process.env.NODE_ENV !== "production") {
+            console.log(`[MONTHLY-OCCUPANCY] İstek alındı: year=${year}, month=${month}`);
+            console.log(`[MONTHLY-OCCUPANCY] Tarih aralığı: ${startAt} → ${endAt}`);
+        }
+
+        // Çalışma saatleri ve kapalı günler settings'den
+        const settings = await getBusinessSettingsJson();
+        const startHour = String(settings.start_hour ?? "09:00");
+        const endHour = String(settings.end_hour ?? "22:00");
+        const closedDays = Array.isArray(settings.closed_days) ? settings.closed_days : [];
+
+        if (process.env.NODE_ENV !== "production") {
+            console.log(`[MONTHLY-OCCUPANCY] Settings: start_hour=${startHour}, end_hour=${endHour}, closed_days=${JSON.stringify(closedDays)}`);
+        }
+
+        // start_hour/end_hour -> dakika cinsinden günlük toplam
+        const [sH, sM] = startHour.split(":").map(Number);
+        const [eH, eM] = endHour.split(":").map(Number);
+        const totalMinutesPerDay = (eH * 60 + eM) - (sH * 60 + sM);
+
+        // SQL: start_at/end_at VARCHAR(80) olduğu için aggregation JS tarafında yapılacak
+        // confirmed + completed + no_show randevuları çek (cancelled hariç)
+        // Aralık karşılaştırması SUBSTRING ile (string karşılaştırmasında .000 vs boşluk sorun çıkarıyor)
+        const [rows] = await pool.execute(
+            `SELECT SUBSTRING(start_at, 1, 10) AS day,
+                    start_at,
+                    end_at,
+                    status
+             FROM appointments
+             WHERE SUBSTRING(start_at, 1, 10) >= ?
+               AND SUBSTRING(start_at, 1, 10) <= ?
+               AND status IN ('confirmed', 'completed', 'no_show')`,
+            [`${year}-${mm}-01`, `${year}-${mm}-${String(lastDay).padStart(2, "0")}`]
+        );
+
+        if (process.env.NODE_ENV !== "production") {
+            console.log(`[MONTHLY-OCCUPANCY] SQL'den gelen randevu sayısı: ${rows.length}`);
+            if (rows.length > 0) {
+                console.log(`[MONTHLY-OCCUPANCY] İlk 3 örnek:`, rows.slice(0, 3));
+            } else {
+                console.log(`[MONTHLY-OCCUPANCY] UYARI: Hiç randevu dönmedi! Aralığı kontrol et: ${startAt} → ${endAt}`);
+            }
+        }
+
+        // rows -> map[YYYY-MM-DD] = { filled_minutes, appointments_count }
+        const dayMap = {};
+        let parseErrors = 0;
+        for (const row of rows) {
+            const dayStr = String(row.day).slice(0, 10);
+
+            // Temporal API ile dakika farkı hesapla
+            const startDt = t.fromDBDateTime(row.start_at);
+            const endDt = t.fromDBDateTime(row.end_at);
+            let minutes = 0;
+            if (startDt && endDt) {
+                minutes = t.diffMinutes(startDt, endDt);
+            } else {
+                parseErrors += 1;
+                if (process.env.NODE_ENV !== "production") {
+                    console.warn(`[MONTHLY-OCCUPANCY] Parse hatası: start_at=${row.start_at}, end_at=${row.end_at}`);
+                }
+            }
+
+            if (!dayMap[dayStr]) {
+                dayMap[dayStr] = { filled_minutes: 0, appointments_count: 0 };
+            }
+            dayMap[dayStr].filled_minutes += minutes;
+            dayMap[dayStr].appointments_count += 1;
+        }
+
+        if (process.env.NODE_ENV !== "production") {
+            console.log(`[MONTHLY-OCCUPANCY] dayMap oluşturuldu: ${Object.keys(dayMap).length} gün, parse hataları: ${parseErrors}`);
+            console.log(`[MONTHLY-OCCUPANCY] dayMap içeriği:`, dayMap);
+        }
+
+        // Tüm günleri üret (kapalı günler dahil)
+        const days = [];
+        let workingDays = 0;
+        let totalFilledMinutes = 0;
+
+        for (let d = 1; d <= lastDay; d++) {
+            const dateStr = `${year}-${mm}-${String(d).padStart(2, "0")}`;
+            const dateObj = new Date(year, month - 1, d);
+            const dayOfWeek = dateObj.getDay(); // 0 = Pazar
+            const isClosed = closedDays.includes(dayOfWeek);
+
+            const dayData = dayMap[dateStr] || { filled_minutes: 0, appointments_count: 0 };
+
+            days.push({
+                date: dateStr,
+                day: d,
+                day_of_week: dayOfWeek,
+                is_closed: isClosed,
+                filled_minutes: dayData.filled_minutes,
+                appointments_count: dayData.appointments_count,
+                total_minutes: isClosed ? 0 : totalMinutesPerDay
+            });
+
+            if (!isClosed) {
+                workingDays += 1;
+                totalFilledMinutes += dayData.filled_minutes;
+            }
+        }
+
+        const totalPossibleMinutes = workingDays * totalMinutesPerDay;
+        const occupancyPercent = totalPossibleMinutes > 0
+            ? (totalFilledMinutes / totalPossibleMinutes) * 100
+            : 0;
+
+        if (process.env.NODE_ENV !== "production") {
+            console.log(`[MONTHLY-OCCUPANCY] Summary: working_days=${workingDays}, total_filled=${totalFilledMinutes}dk (${Math.floor(totalFilledMinutes/60)}:${String(totalFilledMinutes%60).padStart(2,'0')}), total_possible=${totalPossibleMinutes}dk, occupancy=${occupancyPercent.toFixed(1)}%`);
+            console.log(`[MONTHLY-OCCUPANCY] İlk 5 gün:`, days.slice(0, 5).map(d => ({ date: d.date, filled: d.filled_minutes, count: d.appointments_count })));
+        }
+
+        return res.json({
+            ok: true,
+            year,
+            month,
+            start_hour: startHour,
+            end_hour: endHour,
+            closed_days: closedDays,
+            total_minutes_per_day: totalMinutesPerDay,
+            days,
+            summary: {
+                working_days: workingDays,
+                total_filled_minutes: totalFilledMinutes,
+                total_possible_minutes: totalPossibleMinutes,
+                occupancy_percent: Math.round(occupancyPercent * 10) / 10
+            }
+        });
+    }),
+
+    /**
+     * POST /api/appointments/day-details
+     * Body: { date: "YYYY-MM-DD" }
+     * Belirli bir günün tüm randevularını getirir (confirmed/completed/no_show)
+     * Customer bilgisi JOIN ile birlikte döner
+     */
+    dayDetails: asyncWrap(async (req, res) => {
+        const body = req.body || {};
+        const date = String(body.date || "").trim();
+
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+            throw httpError(400, "Geçerli bir tarih giriniz (YYYY-MM-DD)");
+        }
+
+        if (process.env.NODE_ENV !== "production") {
+            console.log(`[DAY-DETAILS] İstek: date=${date}`);
+        }
+
+        // SQL: o güne ait randevuları customer bilgisi ile birlikte çek
+        const [rows] = await pool.execute(
+            `SELECT
+                a.id,
+                a.start_at,
+                a.end_at,
+                a.status,
+                a.service_name_snapshot,
+                a.service_duration_minutes_snapshot,
+                a.service_price_snapshot,
+                a.provider_name_snapshot,
+                a.provider_type_snapshot,
+                a.provider_id,
+                a.customer_id,
+                a.customer_note,
+                a.staff_note,
+                a.is_custom,
+                c.display_name AS customer_name,
+                c.phone AS customer_phone
+             FROM appointments a
+             LEFT JOIN customers c ON c.id = a.customer_id
+             WHERE SUBSTRING(a.start_at, 1, 10) = ?
+               AND a.status IN ('confirmed', 'completed', 'no_show')
+             ORDER BY a.start_at ASC, a.id ASC`,
+            [date]
+        );
+
+        const appointments = rows.map((row) => {
+            // Dakika hesabı Temporal API ile
+            const startDt = t.fromDBDateTime(row.start_at);
+            const endDt = t.fromDBDateTime(row.end_at);
+            let durationMinutes = 0;
+            if (startDt && endDt) {
+                durationMinutes = t.diffMinutes(startDt, endDt);
+            }
+
+            // Saat başlangıcı (YYYY-MM-DD HH:MM)
+            const timeStr = String(row.start_at).slice(11, 16);
+
+            return {
+                id: row.id,
+                start_at: row.start_at,
+                end_at: row.end_at,
+                start_time: timeStr,
+                duration_minutes: durationMinutes,
+                status: row.status,
+                service_name: row.service_name_snapshot,
+                service_duration: row.service_duration_minutes_snapshot,
+                service_price: row.service_price_snapshot,
+                provider_name: row.provider_name_snapshot,
+                provider_type: row.provider_type_snapshot,
+                provider_id: row.provider_id,
+                customer_id: row.customer_id,
+                customer_name: row.customer_name || `Müşteri #${row.customer_id}`,
+                customer_phone: row.customer_phone || null,
+                customer_note: row.customer_note,
+                staff_note: row.staff_note,
+                is_custom: row.is_custom === 1
+            };
+        });
+
+        if (process.env.NODE_ENV !== "production") {
+            console.log(`[DAY-DETAILS] ${appointments.length} randevu bulundu`);
+        }
+
+        return res.json({
+            ok: true,
+            date,
+            appointments,
+            count: appointments.length
+        });
+    }),
+
+    /**
      * POST /api/appointments/panel/create
      * body: { serviceId, date, time, phone, display_name?, customer_note?, staffId? }
      */
@@ -2296,14 +2544,14 @@ const BookingControllers = {
                 `
            INSERT INTO appointments
              (
-              provider_id, service_id, is_custom, customer_id,
+              provider_id, service_id, is_custom, source, customer_id,
               start_at, end_at,
               service_name_snapshot, service_duration_minutes_snapshot, service_price_snapshot,
               provider_name_snapshot, provider_type_snapshot,
               customer_note
             )
           VALUES
-            (?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, 'barber', ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
         `,
                 [
                     provider.id,
@@ -2365,6 +2613,7 @@ const BookingControllers = {
                 start_at: startAt,
                 status: "confirmed",
             });
+            emitDesktopEvent("command", "print.appointment", { appointmentId, date: startAt });
             return res.status(201).json({ ok: true, appointmentId });
         } catch (err) {
             await conn.rollback();
@@ -2504,14 +2753,14 @@ const BookingControllers = {
                 `
            INSERT INTO appointments
              (
-              provider_id, service_id, is_custom, customer_id,
+              provider_id, service_id, is_custom, source, customer_id,
               start_at, end_at,
               service_name_snapshot, service_duration_minutes_snapshot, service_price_snapshot,
               provider_name_snapshot, provider_type_snapshot,
               customer_note
             )
           VALUES
-            (?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, 'barber', ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
         `,
                 [
                     provider.id,
@@ -2573,6 +2822,7 @@ const BookingControllers = {
                 start_at: startAt,
                 status: "confirmed",
             });
+            emitDesktopEvent("command", "print.appointment", { appointmentId, date: startAt });
             return res.status(201).json({ ok: true, appointmentId });
         } catch (err) {
             await conn.rollback();
@@ -2689,14 +2939,14 @@ const BookingControllers = {
                 `
           INSERT INTO appointments
             (
-              provider_id, service_id, is_custom, customer_id,
+              provider_id, service_id, is_custom, source, customer_id,
               start_at, end_at,
               service_name_snapshot, service_duration_minutes_snapshot, service_price_snapshot,
               provider_name_snapshot, provider_type_snapshot,
               customer_note
             )
           VALUES
-            (?, ?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, 'barber', ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
         `,
                 [
                     provider.id,
@@ -2758,6 +3008,8 @@ const BookingControllers = {
                 start_at: startAt,
                 status: "confirmed",
             });
+
+            emitDesktopEvent("command", "print.appointment", { appointmentId, date: startAt });
 
             return res.status(201).json({ ok: true, appointmentId });
         } catch (err) {
@@ -2972,6 +3224,8 @@ const BookingControllers = {
                 start_at: startAt,
                 status: "confirmed",
             });
+
+            emitDesktopEvent("command", "print.appointment", { appointmentId, date: startAt });
 
             return res.status(201).json({ ok: true, appointmentId });
         } catch (err) {
@@ -3613,6 +3867,40 @@ const BookingControllers = {
             }
         }
 
+        // ====== Get Reserved Slots ======
+        const { expandReservedSlots } = require('./src/services/reserved-slot-expander');
+        let expandedReservedSlots = [];
+        if (providerId) {
+            const [rsRows] = await pool.execute(
+                `SELECT provider_id, day_of_week, start_time, end_time,
+                        recurrence_weeks, beginning, is_active, note
+                 FROM reserved_slots
+                 WHERE provider_id = ? AND is_active = 1`,
+                [providerId]
+            );
+            expandedReservedSlots = expandReservedSlots({
+                date: targetDate,
+                reservedSlots: rsRows,
+                providerId
+            });
+        }
+
+        // ====== Reserved Slot Preview Mode ======
+        // Preview a proposed reserved slot (ghost slot shown as "reserved" status)
+        const previewSlot = body.reserved_slot_preview;
+        if (previewSlot && providerId) {
+            const previewStart = previewSlot.start_time || previewSlot.start;
+            const previewEnd = previewSlot.end_time || previewSlot.end;
+            if (previewStart && previewEnd) {
+                expandedReservedSlots.push({
+                    start: String(previewStart).slice(0, 5),
+                    end: String(previewEnd).slice(0, 5),
+                    source: 'preview',
+                    note: previewSlot.note || 'Önizleme'
+                });
+            }
+        }
+
         // ====== Today Filter ======
         const nowZ = t.now();
         const isToday = targetDate === nowZ.toPlainDate().toString();
@@ -3627,6 +3915,7 @@ const BookingControllers = {
             closures,
             breakRules,
             staticSlots,
+            reservedSlots: expandedReservedSlots,
             isToday,
             currentMinute,
             settings: { slotTime }
@@ -3777,6 +4066,10 @@ const BookingControllers = {
                     start_at: ap.start_at,
                     status,
                 });
+                emitDesktopEvent("command", "print.appointment", { appointmentId, date: ap.start_at });
+                if (status === "cancelled") {
+                    emitDesktopEvent("state", "appointment.cancelled", { appointmentId });
+                }
             }
             return res.json({ ok: true });
         } finally {
@@ -4419,6 +4712,23 @@ const ScopedControllers = {
              ON DUPLICATE KEY UPDATE settings_json = VALUES(settings_json), updated_at = ?`,
             [JSON.stringify(settingsObj || {}), t.toISODateTime(t.now())]
         );
+
+        // Desktop SSE — settings değiştiyse bildir
+        emitDesktopEvent("state", "settings.updated", {
+            printer_enabled: !!settingsObj.printer_enabled,
+            printer_auto_print_new: !!settingsObj.printer_auto_print_new,
+            printer_daily_report: !!settingsObj.printer_daily_report
+        });
+
+        // printer_enabled değişikliği ayrı bir event olarak
+        if (typeof settingsObj.printer_enabled === "boolean") {
+            emitDesktopEvent(
+                "state",
+                settingsObj.printer_enabled ? "printer.enabled" : "printer.disabled",
+                {}
+            );
+        }
+
         return res.json({ ok: true });
     }),
 
@@ -5282,6 +5592,143 @@ const ScopedControllers = {
         return res.json({ ok: true, item });
     }),
 
+    /**
+     * reserved_slots CRUD
+     */
+    reservedSlotsList: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const [rows] = await pool.execute(
+            `SELECT rs.*, sp.name AS provider_name, c.display_name AS customer_name
+             FROM reserved_slots rs
+             LEFT JOIN service_providers sp ON sp.id = rs.provider_id
+             LEFT JOIN customers c ON c.id = rs.customer_id
+             ORDER BY rs.day_of_week, rs.start_time`
+        );
+        return res.json({ ok: true, items: rows });
+    }),
+
+    reservedSlotsCreate: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const body = req.body || {};
+        const { provider_id, customer_id, day_of_week, start_time, end_time,
+                recurrence_weeks, beginning, is_active, note } = body;
+        if (!provider_id) throw httpError(400, "provider_id zorunlu");
+        if (!day_of_week) throw httpError(400, "day_of_week zorunlu");
+        if (!start_time) throw httpError(400, "start_time zorunlu");
+        if (!end_time) throw httpError(400, "end_time zorunlu");
+        const [result] = await pool.execute(
+            `INSERT INTO reserved_slots
+             (provider_id, customer_id, day_of_week, start_time, end_time,
+              recurrence_weeks, beginning, is_active, note, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+            [
+                Number(provider_id),
+                customer_id ? Number(customer_id) : null,
+                day_of_week,
+                start_time,
+                end_time,
+                recurrence_weeks ? Number(recurrence_weeks) : 1,
+                beginning || null,
+                is_active !== undefined ? (is_active ? 1 : 0) : 1,
+                note || null
+            ]
+        );
+        return res.status(201).json({ ok: true, id: result.insertId });
+    }),
+
+    reservedSlotsUpdate: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const id = Number(req.params.id);
+        if (!id) throw httpError(400, "id zorunlu");
+        const body = req.body || {};
+        const fields = [];
+        const params = [];
+        const allowed = ["provider_id", "customer_id", "day_of_week", "start_time",
+                         "end_time", "recurrence_weeks", "beginning", "is_active", "note"];
+        for (const f of allowed) {
+            if (body[f] !== undefined) {
+                fields.push(`${f} = ?`);
+                params.push(f === "provider_id" || f === "customer_id" || f === "recurrence_weeks"
+                    ? Number(body[f]) : body[f]);
+            }
+        }
+        if (fields.length === 0) throw httpError(400, "Güncellenecek alan yok");
+        fields.push("updated_at = NOW()");
+        params.push(id);
+        await pool.execute(
+            `UPDATE reserved_slots SET ${fields.join(", ")} WHERE id = ?`,
+            params
+        );
+        return res.json({ ok: true });
+    }),
+
+    reservedSlotsDelete: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const id = Number(req.params.id);
+        if (!id) throw httpError(400, "id zorunlu");
+        await pool.execute(`DELETE FROM reserved_slots WHERE id = ?`, [id]);
+        return res.json({ ok: true });
+    }),
+
+    reservedSlotsGetById: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const id = Number(req.params.id);
+        if (!id) throw httpError(400, "id zorunlu");
+        const [rows] = await pool.execute(
+            `SELECT rs.*, sp.name AS provider_name, c.display_name AS customer_name
+             FROM reserved_slots rs
+             LEFT JOIN service_providers sp ON sp.id = rs.provider_id
+             LEFT JOIN customers c ON c.id = rs.customer_id
+             WHERE rs.id = ? LIMIT 1`,
+            [id]
+        );
+        return res.json({ ok: true, item: rows[0] || null });
+    }),
+
+    /**
+     * POST /api/reserved-slots/check-conflicts
+     * Verilen parametrelere göre çakışan rezervasyonları döner.
+     * Kaydetmeden önce çakışma kontrolü yapar.
+     */
+    reservedSlotsCheckConflicts: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const body = req.body || {};
+        const { provider_id, day_of_week, start_time, end_time, beginning, exclude_id } = body;
+        if (!provider_id) throw httpError(400, "provider_id zorunlu");
+        if (!day_of_week) throw httpError(400, "day_of_week zorunlu");
+        if (!start_time) throw httpError(400, "start_time zorunlu");
+        if (!end_time) throw httpError(400, "end_time zorunlu");
+
+        // Overlap check: NOT (end_a <= start_b OR start_a >= end_b)
+        const query = `
+            SELECT id, day_of_week, start_time, end_time, beginning, note, customer_id
+            FROM reserved_slots
+            WHERE provider_id = ?
+              AND is_active = 1
+              AND day_of_week = ?
+              AND end_time > ?
+              AND start_time < ?
+              AND (? IS NULL OR beginning IS NULL OR beginning <= CURDATE())
+              AND (? IS NULL OR id != ?)
+        `;
+        const [rows] = await pool.execute(query, [
+            Number(provider_id),
+            day_of_week,
+            start_time,
+            end_time,
+            beginning || null,
+            exclude_id || null,
+            exclude_id || null
+        ]);
+        return res.json({ ok: true, conflicts: rows });
+    }),
+
     servicesGet: asyncWrap(async (req, res) => {
         const { id } = req.params;
         const businessId = getPersonalBusinessId();
@@ -5303,6 +5750,211 @@ const ScopedControllers = {
         const [rows] = await pool.execute(`SELECT * FROM sounds WHERE id = ? LIMIT 1`, [id]);
         if (!rows.length) return res.status(404).json({ ok: false, message: "Sound not found" });
         return res.json({ ok: true, item: rows[0] });
+    }),
+
+    // Desktop Events ACK — desktop uygulaması yazdırma sonucunu bildirir
+    desktopEventAck: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        const { eventId, status, reason } = req.body || {};
+
+        if (!eventId) throw httpError(400, "eventId zorunlu");
+        if (!["success", "failed"].includes(status)) {
+            throw httpError(400, "status 'success' veya 'failed' olmalı");
+        }
+
+        // Şimdilik console log — ileride veritabanına kaydedilebilir
+        console.log(`[DesktopACK] event=${eventId} status=${status} reason=${reason || ""}`);
+
+        return res.json({ ok: true });
+    }),
+
+    // Desktop Appointments Today — yazıcı için günlük veri
+    desktopAppointmentsToday: asyncWrap(async (req, res) => {
+        // X-Desktop-Secret auth
+        const secret = process.env.DESKTOP_EVENTS_SECRET;
+        if (secret && req.headers["x-desktop-secret"] !== secret) {
+            throw httpError(401, "Unauthorized");
+        }
+
+        const dateStr = req.query.date || todayYmd();
+        const nextDateStr = addDaysYmd(dateStr, 1);
+
+        // SQL: date 06:00 → next_date 03:00 (gece yarısı devam eden randevular için)
+        const startRange = `${dateStr} 06:00:00`;
+        const endRange = `${nextDateStr} 03:00:00`;
+
+        // Business/branch info (app_settings)
+        const settings = await getBusinessSettingsJson(getPersonalBusinessId());
+
+        // Günün randevuları
+        const [appts] = await pool.execute(
+            `SELECT
+                 a.id,
+                 a.start_at,
+                 a.end_at,
+                 a.status,
+                 a.service_name_snapshot,
+                 a.service_duration_minutes_snapshot,
+                 a.service_price_snapshot,
+                 a.provider_name_snapshot,
+                 a.provider_type_snapshot,
+                 a.customer_note,
+                 a.staff_note,
+                 c.id AS customer_id,
+                 c.display_name AS customer_name,
+                 c.nickname AS customer_nickname,
+                 c.phone AS customer_phone
+             FROM appointments a
+             LEFT JOIN customers c ON c.id = a.customer_id
+             WHERE a.start_at >= ? AND a.start_at < ?
+               AND a.status IN ('confirmed','completed','no_show')
+             ORDER BY a.start_at ASC`,
+            [startRange, endRange]
+        );
+
+        return res.json({
+            ok: true,
+            date: dateStr,
+            business: {
+                name: settings.business_name,
+                phone: settings.business_phone,
+                address: settings.business_address,
+                city: settings.business_city,
+                district: settings.business_district
+            },
+            branch: {
+                name: settings.branch_name,
+                phone: settings.branch_phone,
+                address: settings.branch_address
+            },
+            printer_settings: {
+                printer_enabled: !!settings.printer_enabled,
+                printer_auto_print_new: !!settings.printer_auto_print_new,
+                printer_daily_report: !!settings.printer_daily_report
+            },
+            appointments: appts.map(a => ({
+                id: a.id,
+                start_at: a.start_at,
+                end_at: a.end_at,
+                status: a.status,
+                service_name: a.service_name_snapshot,
+                service_duration: a.service_duration_minutes_snapshot,
+                service_price: a.service_price_snapshot,
+                provider_name: a.provider_name_snapshot,
+                provider_type: a.provider_type_snapshot,
+                customer_id: a.customer_id,
+                customer_name: a.customer_name,
+                customer_nickname: a.customer_nickname,
+                customer_phone: a.customer_phone,
+                customer_note: a.customer_note,
+                staff_note: a.staff_note
+            })),
+            count: appts.length
+        });
+    }),
+
+    // Desktop Appointment By ID — tek randevu detayı
+    desktopAppointmentById: asyncWrap(async (req, res) => {
+        // X-Desktop-Secret auth
+        const secret = process.env.DESKTOP_EVENTS_SECRET;
+        if (secret && req.headers["x-desktop-secret"] !== secret) {
+            throw httpError(401, "Unauthorized");
+        }
+
+        const appointmentId = Number(req.params.id);
+        if (!appointmentId) throw httpError(400, "Geçersiz appointment ID");
+
+        // Business/branch info (app_settings)
+        const settings = await getBusinessSettingsJson(getPersonalBusinessId());
+
+        // Randevu detayı
+        const [appts] = await pool.execute(
+            `SELECT
+                 a.id,
+                 a.start_at,
+                 a.end_at,
+                 a.status,
+                 a.service_name_snapshot,
+                 a.service_duration_minutes_snapshot,
+                 a.service_price_snapshot,
+                 a.provider_name_snapshot,
+                 a.provider_type_snapshot,
+                 a.customer_note,
+                 a.staff_note,
+                 c.id AS customer_id,
+                 c.display_name AS customer_name,
+                 c.nickname AS customer_nickname,
+                 c.phone AS customer_phone
+             FROM appointments a
+             LEFT JOIN customers c ON c.id = a.customer_id
+             WHERE a.id = ?
+             LIMIT 1`,
+            [appointmentId]
+        );
+
+        if (!appts.length) {
+            throw httpError(404, "Randevu bulunamadı");
+        }
+
+        const a = appts[0];
+        return res.json({
+            ok: true,
+            appointment: {
+                id: a.id,
+                start_at: a.start_at,
+                end_at: a.end_at,
+                status: a.status,
+                service_name: a.service_name_snapshot,
+                service_duration: a.service_duration_minutes_snapshot,
+                service_price: a.service_price_snapshot,
+                provider_name: a.provider_name_snapshot,
+                provider_type: a.provider_type_snapshot,
+                customer_id: a.customer_id,
+                customer_name: a.customer_name,
+                customer_nickname: a.customer_nickname,
+                customer_phone: a.customer_phone,
+                customer_note: a.customer_note,
+                staff_note: a.staff_note
+            },
+            business: {
+                name: settings.business_name,
+                phone: settings.business_phone,
+                address: settings.business_address,
+                city: settings.business_city,
+                district: settings.business_district
+            },
+            branch: {
+                name: settings.branch_name,
+                phone: settings.branch_phone,
+                address: settings.branch_address
+            },
+            printer_settings: {
+                printer_enabled: !!settings.printer_enabled,
+                printer_auto_print_new: !!settings.printer_auto_print_new,
+                printer_daily_report: !!settings.printer_daily_report
+            }
+        });
+    }),
+
+    // Desktop Event Action — calendar'dan gün başı/gün sonu komutu
+    desktopEventAction: asyncWrap(async (req, res) => {
+        // X-Desktop-Secret auth
+        const secret = process.env.DESKTOP_EVENTS_SECRET;
+        if (secret && req.headers["x-desktop-secret"] !== secret) {
+            throw httpError(401, "Unauthorized");
+        }
+
+        const { action } = req.body || {};
+        if (action !== "day.start" && action !== "day.end") {
+            throw httpError(400, "Invalid action");
+        }
+
+        emitDesktopEvent("command", action, {
+            triggeredAt: new Date().toISOString(),
+            triggeredBy: "calendar"
+        });
+
+        res.json({ ok: true });
     }),
 };
 

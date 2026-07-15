@@ -1,1 +1,0 @@
-function i(){return"/api".replace(/\/+$/,"")}function s(r){if(r==null||r==="")return"-";const n=Number(r);if(Number.isNaN(n))return String(r);const t=String(n).includes(".")||String(n).includes(",");return`${n.toFixed(t?2:0)} TL`}export{i as b,s as f};

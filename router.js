@@ -3,28 +3,11 @@
 
 const express = require("express");
 const { AuthControllers, BookingControllers, ScopedControllers } = require("./controllers");
-const { sseHandler } = require("./sse");
+const { sseHandler, desktopSseHandler } = require("./sse");
 const { runJobs } = require("./scheduler");
 
 const router = express.Router();
 
-/**
- * CRON ENDPOINT
- * Cron job manager 5 dakikada bir tetikler
- */
-router.post("/cron/jobs", async (req, res) => {
-    const cronSecret = process.env.CRON_SECRET;
-    if (cronSecret && req.headers["x-cron-secret"] !== cronSecret) {
-        return res.status(403).json({ ok: false, message: "Forbidden" });
-    }
-    try {
-        await runJobs();
-        res.json({ ok: true, message: "Jobs executed" });
-    } catch (err) {
-        console.error("[CRON] Error:", err);
-        res.status(500).json({ ok: false, message: "Internal error" });
-    }
-});
 
 /**
  * AUTH
@@ -41,6 +24,13 @@ router.get("/appointments/test-stream", (req, res) => {
 	emitAppointment({ test: true, time: Date.now() });
 	res.json({ ok: true, message: "Test event sent" });
 });
+
+// Desktop Events SSE (yazıcı komutları için)
+router.get("/desktop/events/stream", desktopSseHandler);
+router.post("/desktop/events/ack", ScopedControllers.desktopEventAck);
+router.post("/desktop/events/action", ScopedControllers.desktopEventAction);
+router.get("/desktop/appointments/today", ScopedControllers.desktopAppointmentsToday);
+router.get("/desktop/appointments/:id", ScopedControllers.desktopAppointmentById);
 router.post("/appointments/can-book", BookingControllers.canBook);
 router.post("/appointments/available-slots", BookingControllers.getAvailableSlots);
 router.post("/appointments/slots/generate", BookingControllers.generateSlots);
@@ -65,6 +55,8 @@ router.get("/customers/flags/:customerId", BookingControllers.customerFlags);
 router.get("/customers/stats", BookingControllers.customerStats);
 router.get("/customers", BookingControllers.customerList);
 router.post("/appointments/report-month", BookingControllers.reportMonth);
+router.post("/appointments/monthly-occupancy", BookingControllers.monthlyOccupancy);
+router.post("/appointments/day-details", BookingControllers.dayDetails);
 router.post("/appointments/:id/send-reminder", ScopedControllers.sendAppointmentReminder);
 
 // Scoped (read-only / limited) routes
@@ -164,5 +156,13 @@ router.post("/provider_static_slots", ScopedControllers.providerStaticSlotsCreat
 router.put("/provider_static_slots/:id", ScopedControllers.providerStaticSlotsUpdate);
 router.delete("/provider_static_slots/:id", ScopedControllers.providerStaticSlotsDelete);
 router.get("/provider_static_slots/:id", ScopedControllers.providerStaticSlotsGetById);
+
+// V2 Slot Engine - reserved_slots CRUD
+router.get("/reserved_slots", ScopedControllers.reservedSlotsList);
+router.post("/reserved_slots", ScopedControllers.reservedSlotsCreate);
+router.put("/reserved_slots/:id", ScopedControllers.reservedSlotsUpdate);
+router.delete("/reserved_slots/:id", ScopedControllers.reservedSlotsDelete);
+router.get("/reserved_slots/:id", ScopedControllers.reservedSlotsGetById);
+router.post("/reserved_slots/check-conflicts", ScopedControllers.reservedSlotsCheckConflicts);
 
 module.exports = router;
