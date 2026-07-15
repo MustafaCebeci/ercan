@@ -9,6 +9,7 @@ const router = require("./router.js");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const jwt = require("jsonwebtoken");
+const { pathToRegexp } = require("path-to-regexp");
 const { pool } = require("./models");
 const t = require("./temporal_api.utils");
 const { startScheduler } = require("./cron");
@@ -63,7 +64,7 @@ const publicPages = new Set([
   
 ]);
 
-const publicApi = new Set([
+const publicApi = [
   "/api/auth/login",
   "/api/auth/verify",
   "/api/auth/logout",
@@ -79,7 +80,17 @@ const publicApi = new Set([
   "/api/desktop/events/action",
   "/api/desktop/appointments/today",
   "/api/desktop/appointments/:id",
-]);
+];
+
+// Compile publicApi patterns to regex matchers at startup — runs once
+const publicApiMatchers = publicApi.map((pattern) => {
+  const { regexp, keys } = pathToRegexp(pattern);
+  return { pattern, regexp, keys };
+});
+
+function isPublicApi(pathname) {
+  return publicApiMatchers.some(({ regexp }) => regexp.test(pathname));
+}
 
 function isPublicAsset(pathname) {
   return (
@@ -122,7 +133,7 @@ app.use((req, res, next) => {
   if (isPublicAsset(pathname)) return next();
 
   if (pathname.startsWith("/api")) {
-    if (publicApi.has(pathname)) return next();
+    if (isPublicApi(pathname)) return next();
     const decoded = readJwt(req);
     if (!decoded) return res.status(401).json({ ok: false, message: "Unauthenticated" });
     if (pathname === "/api/appointments/stream" && decoded.typ !== "user" && decoded.typ !== "barber") {
