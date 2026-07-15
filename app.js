@@ -60,6 +60,7 @@ const publicPages = new Set([
   "/register",
   "/aydinlatma",
   "/gizlilik",
+  
 ]);
 
 const publicApi = new Set([
@@ -73,6 +74,11 @@ const publicApi = new Set([
   "/api/staff",
   "/api/branch_closures/today",
   "/api/cron/jobs",
+  "/api/desktop/events/stream",
+  "/api/desktop/events/ack",
+  "/api/desktop/events/action",
+  "/api/desktop/appointments/today",
+  "/api/desktop/appointments/:id",
 ]);
 
 function isPublicAsset(pathname) {
