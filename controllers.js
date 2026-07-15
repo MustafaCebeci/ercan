@@ -939,23 +939,24 @@ const BookingControllers = {
             (
               provider_id, service_id, is_custom, source, customer_id,
               start_at, end_at,
-              service_duration_minutes_snapshot, service_name_snapshot, service_price_snapshot,
+              service_name_snapshot, service_duration_minutes_snapshot, service_price_snapshot,
               provider_name_snapshot, provider_type_snapshot,
               customer_note
             )
           VALUES
-            (?, ?, ?, 'customer', ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, 'customer', ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
         `,
                 // end_at expr: DATE_ADD(start_at, durationMin)
                 [
                     provider.id,     // provider_id
                     serviceId,      // service_id
                     0,              // is_custom
-                    customerId,      // source = 'customer'
+                    customerId,      // customer_id
                     startAt,         // start_at
                     startAt,         // DATE_ADD start
-                    isCustom ? durationMin : svc.duration_minutes, // DATE_ADD interval = service_duration_minutes_snapshot
+                    isCustom ? durationMin : svc.duration_minutes, // DATE_ADD interval
                     isCustom ? (body.custom_service_name ?? "Özel Randevu") : svc.name, // service_name_snapshot
+                    isCustom ? durationMin : svc.duration_minutes, // service_duration_minutes_snapshot
                     effectivePrice,  // service_price_snapshot
                     provider.name,   // provider_name_snapshot
                     provider.provider_type, // provider_type_snapshot
@@ -2946,7 +2947,7 @@ const BookingControllers = {
               customer_note
             )
           VALUES
-            (?, ?, ?, 'barber', ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, 'barber', ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
         `,
                 [
                     provider.id,
