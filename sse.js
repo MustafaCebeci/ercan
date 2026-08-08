@@ -67,8 +67,9 @@ function desktopSseHandler(req, res) {
   const secret = process.env.DESKTOP_EVENTS_SECRET;
   console.log("[DesktopSSE] Incoming request headers:", JSON.stringify(req.headers));
   console.log("[DesktopSSE] Expected secret:", secret, "| Received:", req.headers["x-desktop-secret"]);
-  if (secret && req.headers["x-desktop-secret"] !== secret) {
-    console.log("[DesktopSSE] Unauthorized — secret mismatch");
+  // Auth: secret tanımlıysa ve header eşleşmezse reddet, secret tanımlı değilse de reddet (fail closed)
+  if (!secret || req.headers["x-desktop-secret"] !== secret) {
+    console.log("[DesktopSSE] Unauthorized — secret missing or mismatch");
     res.writeHead(401, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: false, message: "Unauthorized" }));
     return;

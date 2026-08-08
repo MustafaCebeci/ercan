@@ -31,6 +31,8 @@ router.post("/desktop/events/ack", ScopedControllers.desktopEventAck);
 router.post("/desktop/events/action", ScopedControllers.desktopEventAction);
 router.get("/desktop/appointments/today", ScopedControllers.desktopAppointmentsToday);
 router.get("/desktop/appointments/:id", ScopedControllers.desktopAppointmentById);
+router.get("/desktop/settings", ScopedControllers.desktopSettings);
+router.post("/desktop/appointments/:id/print", ScopedControllers.desktopPrint);
 router.post("/appointments/can-book", BookingControllers.canBook);
 router.post("/appointments/available-slots", BookingControllers.getAvailableSlots);
 router.post("/appointments/slots/generate", BookingControllers.generateSlots);

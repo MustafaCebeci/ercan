@@ -1445,6 +1445,9 @@ VALUES
         const endDay = String(endDate.getDate()).padStart(2, '0');
         const endDateTime = `${endYear}-${endMonth}-${endDay} 03:00:00`;
 
+        // DEBUG: panelListV2 tarih aralığı
+        console.log('[PANEL_V2]', { date, startDateTime, endDateTime });
+
         let query = `
             SELECT
                 a.id AS appointment_id,
@@ -1501,6 +1504,13 @@ VALUES
             status: row.status,
             servicePrice: row.service_price_snapshot,
         }));
+
+        // DEBUG: dönen randevular
+        console.log('[PANEL_V2_ITEMS]', {
+            date,
+            count: items.length,
+            items: items.map(i => ({ id: i.id, start: i.start, end: i.end, status: i.status }))
+        });
 
         return res.json({ ok: true, items });
     }),
@@ -3074,14 +3084,33 @@ VALUES
         if (!endTimeStr) throw httpError(400, "end_time zorunlu");
 
         // Parse times
-        const startAt = toSqlDateTime(dateStr, timeStr);
-        const endAt = toSqlDateTime(dateStr, endTimeStr);
+        // Gece yarısı geçişleri için start_date/end_date ayrı alınabilir (frontend'den)
+        const startDateStr = String(body.start_date || dateStr).trim();
+        const endDateStr = String(body.end_date || startDateStr).trim();
+
+        const startAt = toSqlDateTime(startDateStr, timeStr);
+        const endAt = toSqlDateTime(endDateStr, endTimeStr);
         if (!startAt || !endAt) throw httpError(400, "Gecersiz date/time");
 
+        // Dakika karşılaştırması artık aynı gün üzerinden değil, tarih bazlı yapılmalı
         const startMin = parseHHMMToMinutes(timeStr);
         const endMin = parseHHMMToMinutes(endTimeStr);
         if (startMin === null || endMin === null) throw httpError(400, "Invalid time format");
-        if (endMin <= startMin) throw httpError(400, "Bitis zamani baslangictan once olmali");
+
+        // Tarihleri gerçek datetime'a çevirip karşılaştır (gece yarısı geçişleri için)
+        const startDt = new Date(`${startDateStr} ${timeStr}:00`);
+        const endDt = new Date(`${endDateStr} ${endTimeStr}:00`);
+        if (isNaN(startDt.getTime()) || isNaN(endDt.getTime())) {
+            throw httpError(400, "Invalid date/time");
+        }
+        if (endDt <= startDt) throw httpError(400, "Bitis zamani baslangictan once olmali");
+
+        // DEBUG: createCustom input
+        console.log('[CREATE_CUSTOM]', {
+            dateStr, startDateStr, endDateStr, timeStr, endTimeStr,
+            startAt, endAt,
+            startMin, endMin
+        });
 
         // Validate provider
         const [pRows] = await pool.execute(
@@ -5794,9 +5823,9 @@ const ScopedControllers = {
 
     // Desktop Appointments Today — yazıcı için günlük veri
     desktopAppointmentsToday: asyncWrap(async (req, res) => {
-        // X-Desktop-Secret auth
+        // X-Desktop-Secret auth (fail closed)
         const secret = process.env.DESKTOP_EVENTS_SECRET;
-        if (secret && req.headers["x-desktop-secret"] !== secret) {
+        if (!secret || req.headers["x-desktop-secret"] !== secret) {
             throw httpError(401, "Unauthorized");
         }
 
@@ -5879,9 +5908,9 @@ const ScopedControllers = {
 
     // Desktop Appointment By ID — tek randevu detayı
     desktopAppointmentById: asyncWrap(async (req, res) => {
-        // X-Desktop-Secret auth
+        // X-Desktop-Secret auth (fail closed)
         const secret = process.env.DESKTOP_EVENTS_SECRET;
-        if (secret && req.headers["x-desktop-secret"] !== secret) {
+        if (!secret || req.headers["x-desktop-secret"] !== secret) {
             throw httpError(401, "Unauthorized");
         }
 
@@ -5960,13 +5989,59 @@ const ScopedControllers = {
         });
     }),
 
-    // Desktop Event Action — calendar'dan gün başı/gün sonu komutu
-    desktopEventAction: asyncWrap(async (req, res) => {
-        // X-Desktop-Secret auth
+    // Desktop Settings — app_settings tablosundan settings döndürür
+    desktopSettings: asyncWrap(async (req, res) => {
+        // X-Desktop-Secret auth (fail closed)
         const secret = process.env.DESKTOP_EVENTS_SECRET;
-        if (secret && req.headers["x-desktop-secret"] !== secret) {
+        if (!secret || req.headers["x-desktop-secret"] !== secret) {
             throw httpError(401, "Unauthorized");
         }
+
+        const { settingsJson, updated_at } = await getAppSettingsRow();
+        return res.json({ ok: true, settings: settingsJson, updated_at });
+    }),
+
+    // Desktop Print — randevuyu yazdır (desktop SSE'ye print komutu gönderir)
+    desktopPrint: asyncWrap(async (req, res) => {
+        // Auth OR: X-Desktop-Secret VEYA admin JWT (berber paneli admin kullanıcısı)
+        const secret = process.env.DESKTOP_EVENTS_SECRET;
+        const hasDesktopSecret = secret && req.headers["x-desktop-secret"] === secret;
+        let hasAdminJwt = false;
+        try {
+            const decoded = requireUser(req);
+            await requireAdminUser(decoded);
+            hasAdminJwt = true;
+        } catch (e) {
+            hasAdminJwt = false;
+        }
+
+        if (!hasDesktopSecret && !hasAdminJwt) {
+            throw httpError(401, "Unauthorized");
+        }
+
+        const appointmentId = Number(req.params.id);
+        if (!appointmentId) throw httpError(400, "Geçersiz appointment ID");
+
+        // Randevu var mı kontrol et
+        const [appts] = await pool.execute(
+            `SELECT start_at FROM appointments WHERE id = ? LIMIT 1`,
+            [appointmentId]
+        );
+        if (!appts.length) throw httpError(404, "Randevu bulunamadı");
+
+        // Desktop SSE'ye print komutu gönder
+        const event = emitDesktopEvent("command", "print.appointment", {
+            appointmentId,
+            date: appts[0].start_at
+        });
+
+        return res.json({ ok: true, eventId: event.id });
+    }),
+
+    // Desktop Event Action — calendar'dan gün başı/gün sonu komutu
+    desktopEventAction: asyncWrap(async (req, res) => {
+        // JWT auth — web/calendar tarafından kullanılır
+        requireUser(req);
 
         const { action } = req.body || {};
         if (action !== "day.start" && action !== "day.end") {
