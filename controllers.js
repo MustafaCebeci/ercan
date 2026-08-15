@@ -3863,7 +3863,7 @@ VALUES
         // ====== Get Closures ======
         const closures = [];
         let closureQuery = `
-            SELECT start_at, end_at, scope FROM closures
+            SELECT start_at, end_at, scope, is_all_day FROM closures
             WHERE status = 'active'
               AND DATE(start_at) <= ?
               AND DATE(end_at) >= ?
@@ -3876,13 +3876,26 @@ VALUES
         if (providerId) closureParams.push(providerId);
         const [closureRows] = await pool.execute(closureQuery, closureParams);
         for (const closure of closureRows) {
-            const startDt = t.fromDBDateTime(closure.start_at);
-            const endDt = t.fromDBDateTime(closure.end_at);
-            closures.push({
-                start: `${String(startDt.hour).padStart(2,'0')}:${String(startDt.minute).padStart(2,'0')}`,
-                end: `${String(endDt.hour).padStart(2,'0')}:${String(endDt.minute).padStart(2,'0')}`,
-                scope: closure.scope
-            });
+            const closureStartDate = String(closure.start_at).split(' ')[0];
+            const closureEndDate = String(closure.end_at).split(' ')[0];
+
+            if (closure.is_all_day == 1) {
+                closures.push({
+                    start: closureStartDate + 'T00:00',
+                    end: closureEndDate + 'T23:59',
+                    scope: closure.scope,
+                    is_all_day: 1
+                });
+            } else {
+                const startDt = t.fromDBDateTime(closure.start_at);
+                const endDt = t.fromDBDateTime(closure.end_at);
+                closures.push({
+                    start: `${String(startDt.hour).padStart(2,'0')}:${String(startDt.minute).padStart(2,'0')}`,
+                    end: `${String(endDt.hour).padStart(2,'0')}:${String(endDt.minute).padStart(2,'0')}`,
+                    scope: closure.scope,
+                    is_all_day: 0
+                });
+            }
         }
 
         // ====== Get Break Rules ======

@@ -95,8 +95,27 @@ function generateSlotsV2Engine(input) {
 
     // Add closures
     for (const closure of closures) {
-        const startMin = parseHHMM(closure.start);
-        const endMin = parseHHMM(closure.end);
+        let startMin, endMin;
+
+        if (closure.is_all_day == 1) {
+            // is_all_day=1: Tarih aralığını kontrol et
+            // closure.start = "2026-08-17T00:00", closure.end = "2026-08-24T23:59"
+            const closureStartDate = String(closure.start).split('T')[0];
+            const closureEndDate = String(closure.end).split('T')[0];
+
+            // targetDate bu aralıkta değilse işlem yapma
+            if (date < closureStartDate || date > closureEndDate) {
+                continue;
+            }
+
+            // targetDate aralıktaysa tüm gün kapalı → workingHours kullan
+            startMin = parseHHMM(startHour);
+            endMin = parseHHMM(endHour);
+        } else {
+            startMin = parseHHMM(closure.start);
+            endMin = parseHHMM(closure.end);
+        }
+
         if (endMin > startMin) {
             busyIntervals.push({
                 start: startMin,
