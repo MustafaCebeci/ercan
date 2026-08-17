@@ -4,7 +4,7 @@
 // SMS kanalında ilgili setting açık değilse gönderilmez (OTP hariç)
 
 const { pool } = require('./models');
-const { sendSms, logWhatsAppToDb } = require('./notification.service');
+const { logWhatsAppToDb } = require('./notification.service');
 const { createWhatsAppProvider } = require('./whatsapp');
 
 // Template tanımları
@@ -102,7 +102,7 @@ function buildWaComponents(template, headerVars, bodyVars) {
   return components;
 }
 
-function buildSmsBody(template, bodyVars) {
+function buildSmsBody(template, bodyVars, headerVars = []) {
   const BODIES = {
     staff_appointment: (v) =>
       `Yeni randevu;\nMüşteri: ${v[0]} - ${v[1]}\nTarih: ${v[2]}\nİyi çalışmalar.`,
@@ -114,8 +114,9 @@ function buildSmsBody(template, bodyVars) {
       `Merhaba ${v[0]}, ${v[1]} tarihli randevunuzu hatırlatırız. İyi günler dileriz.`,
     appointment_created: (v) =>
       `Merhaba, ${v[0]} için ${v[1]} tarihli ${v[2]} randevunuz oluşturulmuştur. İyi günler dileriz.`,
+    // login_t1: v[0]=OTP kodu (headerVars'dan gelir), v[1]=ttlLabel, v[2]=businessName
     login_t1: (v) =>
-      `Kodunuzun geçerlilik süresi ${v[0]}'dır. ${v[1]} - İyi günler dileriz.`,
+      `Kodunuz: ${v[0]}. ${v[1]}'dır. ${v[2]} - İyi günler dileriz.`,
   };
   return BODIES[template]?.(bodyVars) || bodyVars.join(' ');
 }
@@ -200,8 +201,15 @@ async function sendNotification({
       }
     }
 
-    const message = buildSmsBody(template, bodyVars);
+    // headerVars varsa (login_t1 gibi) SMS body'ye header'ı ekle
+    const smsBodyVars = headerVars.length > 0
+      ? [...headerVars, ...bodyVars]  // OTP kodu + diğer değişkenler
+      : bodyVars;
+
+    const message = buildSmsBody(template, smsBodyVars);
     try {
+      // Lazy require to avoid circular dependency
+      const { sendSms } = require('./notification.service');
       await sendSms({ appointment_id, phone, message, type, source });
       return { channel: 'sms', ok: true };
     } catch (e) {

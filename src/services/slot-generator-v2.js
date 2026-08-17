@@ -283,6 +283,13 @@ function generateSlotsV2Engine(input) {
         });
     }
 
+    // Eğer tüm slotlar filtrelendiyse (geçen saat) ama gün boyunca closure varsa
+    // → engine boş dönmemeli. Closure tüm günü kapsıyorsa bugün bile tüm gün "closed" olmalı
+    if (filteredSlots.length === 0 && slots.length > 0) {
+        // Tüm slotlar "geçmiş saat" yüzünden filtrelendi — fallback olarak hepsini "closed" yap
+        filteredSlots = slots.map(s => ({ ...s, status: 'closed' }));
+    }
+
     // ====== STEP 8: Build Response ======
     return {
         slots: filteredSlots,

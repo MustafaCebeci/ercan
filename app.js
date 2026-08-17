@@ -176,7 +176,7 @@ app.use((req, res, next) => {
   if (pathname.startsWith("/bPanel") && decoded.typ !== "user") {
     return res.redirect(302, "/login_barber");
   }
-  if (pathname.startsWith("/randevu") && decoded.typ !== "customer") {
+  if ((pathname.startsWith("/randevu") || pathname.startsWith("/randevular")) && decoded.typ !== "customer") {
     return res.redirect(302, "/login_customer");
   }
 
@@ -190,6 +190,7 @@ app.use(async (req, res, next) => {
   if (isPublicAsset(pathname)) return next();
   const isCustomerPage =
     pathname.startsWith("/randevu") ||
+    pathname.startsWith("/randevular") ||
     pathname.startsWith("/success") ||
     pathname === "/login_customer" ||
     pathname === "/register";

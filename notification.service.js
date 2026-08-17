@@ -10,8 +10,8 @@ const { createSmsProvider, TopluMesaj } = require("./sms.provider.js");
 // WhatsApp Provider (WhatsApp Cloud API)
 const { createWhatsAppProvider } = require("./whatsapp.js");
 
-// Message manager
-const { sendNotification } = require("./messageManager");
+// Message manager - lazy require to avoid circular dependency
+// const { sendNotification } = require("./messageManager");
 
 // --- OTP yardımcıları ---
 function generateOtpCode() {
@@ -113,22 +113,25 @@ async function logWhatsAppToDb({
     to_phone,
     body,
     type = "other",
-    provider = "whatsapp_cloud",
     status = "sent",
     wa_message_id = null,
     template_name = null,
     error_message = null,
     source = "system",
 }) {
+    // Normalize type to valid ENUM: ('reminder', 'otp', 'cancellation', 'other')
+    const validTypes = ['reminder', 'otp', 'cancellation', 'other'];
+    const normalizedType = validTypes.includes(type) ? type : 'other';
+
     const now = t.toISODateTime(t.now());
     const sentAt = status === 'sent' ? now : null;
 
     await pool.execute(
         `INSERT INTO whatsapp_messages
-      (appointment_id, customer_id, to_phone, type, body, provider, status, wa_message_id, template_name, error_message, scheduled_at, sent_at, source)
+      (appointment_id, customer_id, to_phone, type, body, status, wa_message_id, template_name, error_message, scheduled_at, sent_at, source)
      VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [appointment_id, customer_id, to_phone, type, body, provider, status, wa_message_id, template_name, error_message, now, sentAt, source]
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [appointment_id, customer_id, to_phone, normalizedType, body, status, wa_message_id, template_name, error_message, now, sentAt, source]
     );
 }
 
@@ -159,6 +162,10 @@ function createSmsApi() {
  * - sms_messages loglar
  */
 async function sendSms({ appointment_id = null, phone, message, type = "otp", source = "system" }) {
+    // Map template type to valid sms_messages ENUM type
+    const validTypes = ['reminder', 'otp', 'other'];
+    const normalizedType = validTypes.includes(type) ? type : 'other';
+
     const smsApi = createSmsApi();
     const providerName = smsApi.getProviderName();
 
@@ -179,7 +186,7 @@ async function sendSms({ appointment_id = null, phone, message, type = "otp", so
             appointment_id,
             to_phone: phone,
             body: message,
-            type,
+            type: normalizedType,
             provider: providerName,
             status: "sent",
             provider_msg_id: providerMsgId,
@@ -195,7 +202,7 @@ async function sendSms({ appointment_id = null, phone, message, type = "otp", so
             appointment_id,
             to_phone: phone,
             body: message,
-            type,
+            type: normalizedType,
             provider: providerName,
             status: "failed",
             provider_msg_id: null,
@@ -299,6 +306,7 @@ async function sendOtp({ user_type, user_id, destinationOverride = null }) {
 
     const ttlLabel = ttlSeconds >= 60 ? `${Math.round(ttlSeconds / 60)} Dakika` : `${ttlSeconds} Saniye`;
 
+    const { sendNotification } = require('./messageManager');
     await sendNotification({
         template: 'login_t1',
         phone: destination,
@@ -353,6 +361,7 @@ async function verifyOtp({ user_type, user_id, code, maxTries = 5 }) {
 async function sendCancellationSms(appointment, closureStart, closureEnd) {
     const customerName = appointment.customer_name || 'musterimiz';
     const appointmentDate = appointment.start_at ? appointment.start_at.slice(0, 10) : '';
+    const { sendNotification } = require('./messageManager');
     await sendNotification({
         template: 'appointment_cancel',
         phone: appointment.customer_phone,
@@ -380,4 +389,5 @@ module.exports = {
 
     // WhatsApp
     sendWhatsApp,
+    logWhatsAppToDb,
 };

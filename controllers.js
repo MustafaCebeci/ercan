@@ -1045,25 +1045,24 @@ VALUES
             // Desktop SSE — yeni randevu oluştu
             emitDesktopEvent("command", "print.appointment", { appointmentId, date: startAt });
 
+            let customerPhone = decoded.phone;
+            if (!customerPhone) {
+                const [cRows] = await pool.execute(
+                    `SELECT phone FROM customers WHERE id = ? LIMIT 1`,
+                    [customerId]
+                );
+                customerPhone = cRows[0]?.phone ?? null;
+            }
+
             try {
-                if (!noPhone) {
-                    let customerPhone = decoded.phone;
-                    if (!customerPhone) {
-                        const [cRows] = await pool.execute(
-                            `SELECT phone FROM customers WHERE id = ? LIMIT 1`,
-                            [customerId]
-                        );
-                        customerPhone = cRows[0]?.phone ?? null;
-                    }
-                    if (customerPhone) {
-                        await sendNotification({
-                            template: 'appointment_created',
-                            phone: customerPhone,
-                            bodyVars: ['Ercan İncirkuş Berber Dükkanı', `${dateStr} ${timeStr}`, svc.name],
-                            appointment_id: appointmentId,
-                            type: 'appointment_created'
-                        });
-                    }
+                if (!noPhone && customerPhone) {
+                    await sendNotification({
+                        template: 'appointment_created',
+                        phone: customerPhone,
+                        bodyVars: ['Ercan İncirkuş Berber Dükkanı', `${dateStr} ${timeStr}`, svc.name],
+                        appointment_id: appointmentId,
+                        type: 'appointment_created'
+                    });
                 }
             } catch (err) {
                 console.error("Bildirim gönderilemedi:", err);
@@ -3888,9 +3887,12 @@ VALUES
         const closureRows = [...globalClosureRows, ...providerClosureRows];
 
         // JavaScript date intersection — targetDate ile kesişen closure'ları filtrele
-        const targetDateStart = new Date(targetDate + 'T00:00:00.000Z');
-        const targetDateEnd   = new Date(targetDate + 'T23:59:59.999Z');
+        // Closure datetime string'leri V8'de LOCAL timezone parse edilir ('YYYY-MM-DD HH:MM:SS')
+        // Target date window da LOCAL midnight/end ile karşılaştırılmalı
+        const targetDateStart = new Date(targetDate + 'T00:00:00');
+        const targetDateEnd   = new Date(targetDate + 'T23:59:59.999');
 
+        const closures = [];
         const filteredClosures = closureRows.filter(row => {
             const cStart = new Date(row.start_at).getTime();
             const cEnd   = new Date(row.end_at).getTime();
@@ -5508,7 +5510,7 @@ const ScopedControllers = {
     }),
 
     periodSettingsForDate: asyncWrap(async (req, res) => {
-        const decoded = requireSession(req);
+        const decoded = requireUser(req);
         if (!decoded) throw httpError(401, "Unauthenticated");
         const body = req.body || {};
         const dateStr = String(body.date || "").trim();
