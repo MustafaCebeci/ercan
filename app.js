@@ -127,26 +127,6 @@ function loginRedirectForPath(pathname) {
   return "/login_customer";
 }
 
-async function isBranchClosedNow() {
-  const z = t.now();
-  const y = z.year;
-  const m = String(z.month).padStart(2, "0");
-  const d = String(z.day).padStart(2, "0");
-  const startAt = `${y}-${m}-${d} 00:00:00`;
-  const endAt = `${y}-${m}-${d} 23:59:59`;
-  const [rows] = await pool.execute(
-    `SELECT id
-       FROM closures
-      WHERE scope = 'global'
-        AND status = 'active'
-        AND start_at <= ?
-        AND end_at >= ?
-      LIMIT 1`,
-    [endAt, startAt]
-  );
-  return rows.length > 0;
-}
-
 app.use((req, res, next) => {
   if (!isProduction) return next();
   const pathname = req.path || "/";
@@ -180,28 +160,6 @@ app.use((req, res, next) => {
     return res.redirect(302, "/login_customer");
   }
 
-  return next();
-});
-
-// -------- Customer Page Guard (branch closed) --------
-app.use(async (req, res, next) => {
-  const pathname = req.path || "/";
-  if (pathname.startsWith("/api")) return next();
-  if (isPublicAsset(pathname)) return next();
-  const isCustomerPage =
-    pathname.startsWith("/randevu") ||
-    pathname.startsWith("/randevular") ||
-    pathname.startsWith("/success") ||
-    pathname === "/login_customer" ||
-    pathname === "/register";
-  if (!isCustomerPage) return next();
-  try {
-    if (await isBranchClosedNow()) {
-      return res.redirect(302, "/");
-    }
-  } catch (err) {
-    console.error("branch closure check failed", err);
-  }
   return next();
 });
 
