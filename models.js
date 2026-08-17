@@ -351,6 +351,27 @@ const Models = {
             "beginning", "is_active", "note", "created_at", "updated_at"
         ],
     }),
+
+    // WhatsApp Webhook Tables
+    incoming_whatsapp_messages: createCrudModel({
+        table: "incoming_whatsapp_messages",
+        pk: "id",
+        columns: [
+            "id", "message_id", "phone", "from_name", "app_id",
+            "payload", "processed", "processed_at", "created_at"
+        ],
+    }),
+
+    // WhatsApp Outbound Messages
+    whatsapp_messages: createCrudModel({
+        table: "whatsapp_messages",
+        pk: "id",
+        columns: [
+            "id", "appointment_id", "customer_id", "to_phone", "type", "source",
+            "body", "wa_message_id", "template_name", "status", "error_message",
+            "scheduled_at", "sent_at", "created_at", "updated_at"
+        ],
+    }),
 };
 
 module.exports = { pool, Models };

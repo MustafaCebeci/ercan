@@ -98,17 +98,16 @@ function generateSlotsV2Engine(input) {
         let startMin, endMin;
 
         if (closure.is_all_day == 1) {
-            // is_all_day=1: Tarih aralığını kontrol et
             // closure.start = "2026-08-17T00:00", closure.end = "2026-08-24T23:59"
             const closureStartDate = String(closure.start).split('T')[0];
             const closureEndDate = String(closure.end).split('T')[0];
 
-            // targetDate bu aralıkta değilse işlem yapma
+            // Skip if targetDate is not in range
             if (date < closureStartDate || date > closureEndDate) {
                 continue;
             }
 
-            // targetDate aralıktaysa tüm gün kapalı → workingHours kullan
+            // targetDate is in range → full day closure → use workingHours
             startMin = parseHHMM(startHour);
             endMin = parseHHMM(endHour);
         } else {

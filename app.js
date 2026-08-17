@@ -13,11 +13,30 @@ const { pathToRegexp } = require("path-to-regexp");
 const { pool } = require("./models");
 const t = require("./temporal_api.utils");
 const { startScheduler } = require("./cron");
+const { ensureSettingsDefaults } = require("./settingsManager");
 const { logRequest } = require("./logger.js");
 
 const app = express();
 
 // -------- Middlewares --------
+// For webhook routes, capture raw body before JSON parsing (for signature verification)
+app.use((req, res, next) => {
+  if (req.path.startsWith('/webhooks/')) {
+    express.raw({ type: 'application/json', limit: '10mb' })(req, res, (err) => {
+      if (err) return next(err);
+      req._rawBody = req.body; // Buffer
+      try {
+        req.body = JSON.parse(req._rawBody.toString());
+      } catch {
+        req.body = null;
+      }
+      next();
+    });
+  } else {
+    next();
+  }
+});
+
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -80,6 +99,8 @@ const publicApi = [
   "/api/desktop/events/action",
   "/api/desktop/appointments/today",
   "/api/desktop/appointments/:id",
+  // WhatsApp Cloud API Webhooks (Meta sends these without JWT)
+  "/webhooks/whatsapp",
 ];
 
 // Compile publicApi patterns to regex matchers at startup — runs once
@@ -131,6 +152,9 @@ app.use((req, res, next) => {
   const pathname = req.path || "/";
 
   if (isPublicAsset(pathname)) return next();
+
+  // WhatsApp webhooks bypass auth (Meta sends without JWT)
+  if (pathname.startsWith("/webhooks/")) return next();
 
   if (pathname.startsWith("/api")) {
     if (isPublicApi(pathname)) return next();
@@ -232,6 +256,9 @@ app.use((err, req, res, next) => {
         message: err.message || "Server error",
     });
 });
+
+// -------- Settings init --------
+ensureSettingsDefaults().catch(console.error);
 
 // -------- Scheduler --------
 startScheduler();

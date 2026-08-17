@@ -7,6 +7,12 @@ const { getMailer, env } = require("./config");
 // SMS Provider (NetGSM)
 const { createSmsProvider, TopluMesaj } = require("./sms.provider.js");
 
+// WhatsApp Provider (WhatsApp Cloud API)
+const { createWhatsAppProvider } = require("./whatsapp.js");
+
+// Message manager
+const { sendNotification } = require("./messageManager");
+
 // --- OTP yardımcıları ---
 function generateOtpCode() {
     return String(Math.floor(100000 + Math.random() * 900000));
@@ -99,6 +105,34 @@ async function logSmsToDb({
 }
 
 /**
+ * DB: whatsapp_messages logla
+ */
+async function logWhatsAppToDb({
+    appointment_id = null,
+    customer_id = null,
+    to_phone,
+    body,
+    type = "other",
+    provider = "whatsapp_cloud",
+    status = "sent",
+    wa_message_id = null,
+    template_name = null,
+    error_message = null,
+    source = "system",
+}) {
+    const now = t.toISODateTime(t.now());
+    const sentAt = status === 'sent' ? now : null;
+
+    await pool.execute(
+        `INSERT INTO whatsapp_messages
+      (appointment_id, customer_id, to_phone, type, body, provider, status, wa_message_id, template_name, error_message, scheduled_at, sent_at, source)
+     VALUES
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [appointment_id, customer_id, to_phone, type, body, provider, status, wa_message_id, template_name, error_message, now, sentAt, source]
+    );
+}
+
+/**
  * MAIL gönder
  */
 async function sendMail({ to, subject, text }) {
@@ -174,6 +208,54 @@ async function sendSms({ appointment_id = null, phone, message, type = "otp", so
 }
 
 /**
+ * WhatsApp mesaj gönder
+ * - WhatsApp Cloud API üzerinden gönderir
+ * - whatsapp_messages loglar
+ */
+async function sendWhatsApp({ appointment_id = null, customer_id = null, phone, message, type = "other", source = "system" }) {
+    const waApi = createWhatsAppProvider();
+    const providerName = waApi.getProviderName();
+
+    try {
+        const resp = await waApi.sendMessage(phone, message);
+
+        const waMsgId = resp?.wa_message_id ?? resp?.message_id ?? null;
+
+        await logWhatsAppToDb({
+            appointment_id,
+            customer_id,
+            to_phone: phone,
+            body: message,
+            type,
+            provider: providerName,
+            status: "sent",
+            wa_message_id: waMsgId,
+            error_message: null,
+            source,
+        });
+
+        return resp;
+    } catch (e) {
+        const errText = e?.message || String(e);
+
+        await logWhatsAppToDb({
+            appointment_id,
+            customer_id,
+            to_phone: phone,
+            body: message,
+            type,
+            provider: providerName,
+            status: "failed",
+            wa_message_id: null,
+            error_message: errText,
+            source,
+        });
+
+        throw new Error(errText);
+    }
+}
+
+/**
  * Tek fonksiyon: OTP üret + DB kaydet + SMS olarak gönder
  *
  * Tüm user_type'lar için SMS kanalı
@@ -200,7 +282,30 @@ async function sendOtp({ user_type, user_id, destinationOverride = null }) {
 
     const message = otpMessage(code);
 
-    await sendSms({ phone: destination, message, type: "otp" });
+    // OTP her zaman gider — login_t1 template (setting kontrolü yok)
+    // otp_ttl_seconds settings'den al (varsayılan 60sn)
+    let ttlSeconds = 60;
+    try {
+        const [rows] = await pool.execute(
+            `SELECT settings_json FROM app_settings LIMIT 1`
+        );
+        if (rows.length > 0 && rows[0].settings_json) {
+            const s = typeof rows[0].settings_json === 'string'
+                ? JSON.parse(rows[0].settings_json)
+                : rows[0].settings_json;
+            ttlSeconds = s.otp_ttl_seconds ?? 60;
+        }
+    } catch {}
+
+    const ttlLabel = ttlSeconds >= 60 ? `${Math.round(ttlSeconds / 60)} Dakika` : `${ttlSeconds} Saniye`;
+
+    await sendNotification({
+        template: 'login_t1',
+        phone: destination,
+        headerVars: [code],
+        bodyVars: [ttlLabel, 'Ercan İncirkuş Berber Dükkanı'],
+        type: 'login_t1'
+    });
 
     return { ok: true, codeSent: code };
 }
@@ -247,14 +352,14 @@ async function verifyOtp({ user_type, user_id, code, maxTries = 5 }) {
  */
 async function sendCancellationSms(appointment, closureStart, closureEnd) {
     const customerName = appointment.customer_name || 'musterimiz';
-    const startTime = closureStart?.slice(11, 16) || '09:00';
-    const endTime = closureEnd?.slice(11, 16) || '18:00';
-    const message = `Ercan İncirkuş Berber Dükkanı - Sayın ${customerName}, randevu aldığınız personelimiz ${startTime} - ${endTime} saatleri arasında çalışmayacaktır. Daha sonrası için randevu alabilir, detaylı bilgi için işletmemizle iletişime geçebilirsiniz. İyi günler dileriz.`;
-    await sendSms({
-        appointment_id: appointment.id,
+    const appointmentDate = appointment.start_at ? appointment.start_at.slice(0, 10) : '';
+    await sendNotification({
+        template: 'appointment_cancel',
         phone: appointment.customer_phone,
-        message: message,
-        type: "cancellation"
+        headerVars: ['Ercan İncirkuş Berber Dükkanı'],
+        bodyVars: ['Ercan İncirkuş Berber Dükkanı', appointmentDate],
+        appointment_id: appointment.id,
+        type: 'appointment_cancel'
     });
 }
 
@@ -272,4 +377,7 @@ module.exports = {
     sendSms,
     sendMail,
     sendCancellationSms,
+
+    // WhatsApp
+    sendWhatsApp,
 };

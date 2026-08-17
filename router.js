@@ -167,4 +167,12 @@ router.delete("/reserved_slots/:id", ScopedControllers.reservedSlotsDelete);
 router.get("/reserved_slots/:id", ScopedControllers.reservedSlotsGetById);
 router.post("/reserved_slots/check-conflicts", ScopedControllers.reservedSlotsCheckConflicts);
 
+// =====================================================
+// WhatsApp Cloud API Webhook
+// =====================================================
+const whatsappWebhook = require("./webhooks/whatsapp");
+
+router.get("/webhooks/whatsapp", whatsappWebhook.verify);
+router.post("/webhooks/whatsapp", whatsappWebhook.handle);
+
 module.exports = router;

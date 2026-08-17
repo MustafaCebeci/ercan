@@ -7,6 +7,7 @@
 
 const { pool } = require("./models");
 const { sendSms } = require("./notification.service");
+const { sendNotification } = require("./messageManager");
 const t = require("./temporal_api.utils");
 
 let isRunning = false;
@@ -34,8 +35,10 @@ async function runJobs() {
             return;
         }
 
-        // 2. No-show kontrolü
-        await markNoShows();
+        // 2. No-show kontrolü (sadece auto_no_show açıksa)
+        if (await isAutoNoShowEnabled()) {
+            await markNoShows();
+        }
 
         // 3. Hatırlatma SMS'leri
         await sendReminders();
@@ -99,6 +102,22 @@ async function isBusinessOpen() {
     }
 }
 
+async function isAutoNoShowEnabled() {
+    try {
+        const [rows] = await pool.execute(
+            `SELECT settings_json FROM app_settings LIMIT 1`
+        );
+        if (!rows.length) return true;
+        let settings = rows[0].settings_json;
+        if (typeof settings === 'string') {
+            settings = JSON.parse(settings || '{}');
+        }
+        return settings?.auto_no_show === true;
+    } catch {
+        return true;
+    }
+}
+
 /**
  * Geçmiş confirmed randevuları no_show olarak işaretle
  * - end_at (randevu bitiş saati) geçmiş ve grace period ek süre geçmiş randevular
@@ -157,13 +176,12 @@ async function markNoShows() {
  */
 async function sendReminders() {
     try {
-        // Önce ayarlardan sms_reminder ve reminder_hours kontrol et
+        // Önce ayarlardan reminder_hours kontrol et
         const [settingsRows] = await pool.execute(
             `SELECT settings_json FROM app_settings LIMIT 1`
         );
 
-        let smsReminderEnabled = true;
-        let reminderHours = 6; // Varsayılan: 6 saat önce
+        let reminderHours = 6;
 
         if (settingsRows.length > 0) {
             let settings = settingsRows[0].settings_json;
@@ -174,13 +192,7 @@ async function sendReminders() {
             } else if (typeof settings !== 'object' || settings === null) {
                 settings = {};
             }
-            smsReminderEnabled = settings.sms_reminder !== false;
             reminderHours = settings.reminder_hours ?? settings.sms_reminder_before ?? 6;
-        }
-
-        if (!smsReminderEnabled) {
-            console.log("[SCHEDULER] SMS hatırlatma kapalı, işlem atlanıyor");
-            return;
         }
 
         // Hatırlatma süresine göre randevuları bul
@@ -218,21 +230,23 @@ async function sendReminders() {
                 continue;
             }
 
-            // SMS mesajı oluştur
-            const timeStr = t.formatDateTime(appt.start_at);
-            const message = `Merhaba ${appt.display_name}, ${timeStr} randevunuzu hatırlatmak isteriz. - Ercan İncirkuş Berber Dükkanı`;
-
             try {
-                await sendSms({
-                    appointment_id: appt.id,
+                const result = await sendNotification({
+                    template: 'appointment_reminder',
                     phone: appt.phone,
-                    message: message,
-                    type: "reminder",
-                    source: "cron"
+                    headerVars: ['Ercan İncirkuş Berber Dükkanı'],
+                    bodyVars: ['Ercan İncirkuş Berber Dükkanı', t.formatDateTime(appt.start_at)],
+                    appointment_id: appt.id,
+                    type: 'appointment_reminder',
+                    source: 'cron'
                 });
-                console.log(`[SCHEDULER] Hatırlatma SMS gönderildi: Randevu #${appt.id}`);
-            } catch (smsErr) {
-                console.error(`[SCHEDULER] SMS hatası (randevu ${appt.id}):`, smsErr.message);
+                if (result.skipped) {
+                    console.log(`[SCHEDULER] Randevu #${appt.id} hatırlatma ayarı kapalı, atlanıyor`);
+                } else {
+                    console.log(`[SCHEDULER] Hatırlatma gönderildi: Randevu #${appt.id}`);
+                }
+            } catch (err) {
+                console.error(`[SCHEDULER] Hatırlatma hatası (randevu ${appt.id}):`, err.message);
             }
         }
 

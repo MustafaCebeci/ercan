@@ -2,7 +2,8 @@
 const { Models, pool } = require("./models");
 const t = require("./temporal_api.utils");
 const jwt = require("jsonwebtoken");
-const { sendOtp, verifyOtp, sendSms, sendCancellationSms } = require("./notification.service.js");
+const { sendOtp, verifyOtp, sendCancellationSms } = require("./notification.service.js");
+const { sendNotification } = require("./messageManager");
 const { emitAppointment, emitDesktopEvent } = require("./sse");
 
 // --------------- Helpers ---------------
@@ -1045,8 +1046,7 @@ VALUES
             emitDesktopEvent("command", "print.appointment", { appointmentId, date: startAt });
 
             try {
-                const smsEnabled = settingsJson.sms_reminder !== false;
-                if (smsEnabled && !noPhone) {
+                if (!noPhone) {
                     let customerPhone = decoded.phone;
                     if (!customerPhone) {
                         const [cRows] = await pool.execute(
@@ -1056,40 +1056,37 @@ VALUES
                         customerPhone = cRows[0]?.phone ?? null;
                     }
                     if (customerPhone) {
-                        const msg = `Ercan İncirkuş Berber Dükkanı - Randevunuz olusturuldu. Tarih: ${dateStr} ${timeStr}. Hizmet: ${svc.name}.`;
-                        await sendSms({
-                            appointment_id: appointmentId,
+                        await sendNotification({
+                            template: 'appointment_created',
                             phone: customerPhone,
-                            message: msg,
-                            type: "reminder"
+                            bodyVars: ['Ercan İncirkuş Berber Dükkanı', `${dateStr} ${timeStr}`, svc.name],
+                            appointment_id: appointmentId,
+                            type: 'appointment_created'
                         });
                     }
                 }
-            } catch (smsErr) {
-                console.error("SMS send failed:", smsErr);
+            } catch (err) {
+                console.error("Bildirim gönderilemedi:", err);
             }
 
-            // Staff bildirim SMS'i
+            // Staff bildirim
             try {
-                const staffNotificationEnabled = settingsJson.sms_notification !== false;
-                if (staffNotificationEnabled) {
-                    const [staffRows] = await pool.execute(
-                        `SELECT phone FROM staff WHERE id = ? LIMIT 1`,
-                        [staffId]
-                    );
-                    const staffPhone = staffRows[0]?.phone ?? null;
-                    if (staffPhone) {
-                        const msg = `Ercan İncirkuş Berber Dükkanı - Yeni randevu: ${svc.name}, ${dateStr} ${timeStr}.`;
-                        await sendSms({
-                            appointment_id: appointmentId,
-                            phone: staffPhone,
-                            message: msg,
-                            type: "reminder"
-                        });
-                    }
+                const [staffRows] = await pool.execute(
+                    `SELECT phone FROM staff WHERE id = ? LIMIT 1`,
+                    [staffId]
+                );
+                const staffPhone = staffRows[0]?.phone ?? null;
+                if (staffPhone) {
+                    await sendNotification({
+                        template: 'staff_appointment',
+                        phone: staffPhone,
+                        bodyVars: [decoded.display_name || 'Müşteri', customerPhone || decoded.phone, `${dateStr} ${timeStr}`],
+                        appointment_id: appointmentId,
+                        type: 'staff_appointment'
+                    });
                 }
-            } catch (staffSmsErr) {
-                console.error("Staff SMS send failed:", staffSmsErr);
+            } catch (err) {
+                console.error("Staff bildirim gönderilemedi:", err);
             }
 
             const appointmentIdOut = appointmentId ?? "";
@@ -1902,7 +1899,7 @@ VALUES
 
             await conn.commit();
 
-            // Müşteriye SMS ile bilgi ver
+            // Müşteriye bildirim
             const timeChanged = String(ap.start_at) !== startAt;
             if (timeChanged) {
                 try {
@@ -1914,11 +1911,16 @@ VALUES
                     if (customer?.phone) {
                         const oldTime = t.formatDateTime(ap.start_at);
                         const newTime = t.formatDateTime(startAt);
-                        const msg = `Ercan İncirkuş Berber Dükkanı - Randevunuz ${oldTime} yerine ${newTime} saatine taşınmıştır. Saygılarımızla.`;
-                        await sendSms({ phone: customer.phone, message: msg, type: "general" });
+                        await sendNotification({
+                            template: 'appointment_update',
+                            phone: customer.phone,
+                            headerVars: ['Ercan İncirkuş Berber Dükkanı'],
+                            bodyVars: ['Ercan İncirkuş Berber Dükkanı', oldTime, newTime],
+                            type: 'appointment_update'
+                        });
                     }
-                } catch (smsErr) {
-                    console.error("SMS gönderim hatası:", smsErr);
+                } catch (err) {
+                    console.error("Bildirim gönderilemedi:", err);
                 }
             }
 
@@ -3860,22 +3862,45 @@ VALUES
             });
         }
 
-        // ====== Get Closures ======
-        const closures = [];
-        let closureQuery = `
+        // ====== Get Closures (2 aşamalı kontrol + JS date intersection) ======
+        // SQL DATE() comparison kaldırıldı — VARCHAR(60) üzerinde MySQL DATE() coercion güvenilir değil.
+        // Tüm active closure'ları çekip JavaScript'te explicit Date parsing ile kesişim kontrolü yapıyoruz.
+
+        // AŞAMA 1: Global closure'lar (provider_id IS NULL) — her zaman
+        const [globalClosureRows] = await pool.execute(`
             SELECT start_at, end_at, scope, is_all_day FROM closures
             WHERE status = 'active'
-              AND DATE(start_at) <= ?
-              AND DATE(end_at) >= ?
-              AND (
-                (scope = 'global' AND provider_id IS NULL)
-                OR (scope = 'provider' AND provider_id = ?)
-              )
-        `;
-        let closureParams = [targetDate, targetDate];
-        if (providerId) closureParams.push(providerId);
-        const [closureRows] = await pool.execute(closureQuery, closureParams);
-        for (const closure of closureRows) {
+              AND scope = 'global'
+              AND provider_id IS NULL
+        `);
+
+        // AŞAMA 2: Provider'a özel closure'lar — sadece providerId varsa
+        let providerClosureRows = [];
+        if (providerId) {
+            [providerClosureRows] = await pool.execute(`
+                SELECT start_at, end_at, scope, is_all_day FROM closures
+                WHERE status = 'active'
+                  AND scope = 'provider'
+                  AND provider_id = ?
+            `, [providerId]);
+        }
+
+        const closureRows = [...globalClosureRows, ...providerClosureRows];
+
+        // JavaScript date intersection — targetDate ile kesişen closure'ları filtrele
+        const targetDateStart = new Date(targetDate + 'T00:00:00.000Z');
+        const targetDateEnd   = new Date(targetDate + 'T23:59:59.999Z');
+
+        const filteredClosures = closureRows.filter(row => {
+            const cStart = new Date(row.start_at).getTime();
+            const cEnd   = new Date(row.end_at).getTime();
+            const tStart = targetDateStart.getTime();
+            const tEnd   = targetDateEnd.getTime();
+            // Kesişim: aStart < bEnd && bStart < aEnd
+            return cStart < tEnd && tStart < cEnd;
+        });
+
+        for (const closure of filteredClosures) {
             const closureStartDate = String(closure.start_at).split(' ')[0];
             const closureEndDate = String(closure.end_at).split(' ')[0];
 
@@ -4537,6 +4562,7 @@ const ScopedControllers = {
         const note = body.note ?? null;
         const cancelAppointments = body.cancel_appointments === true;
         const sendSms = body.send_sms === true;
+        const settingsJson = await getBusinessSettingsJson(businessId);
 
         if (!startAt || !endAt) {
             throw httpError(400, "start_at ve end_at zorunlu");
@@ -4628,7 +4654,7 @@ const ScopedControllers = {
                     );
 
                     // SMS bildirimi gönder
-                    if (sendSms && aptRows.length) {
+                    if (settingsJson.sms_appointment_cancel === true && sendSms && aptRows.length) {
                         for (const appt of aptRows) {
                             await sendCancellationSms(appt, startAt, endAt);
                         }
@@ -5198,6 +5224,7 @@ const ScopedControllers = {
         const decoded = requireUser(req);
         const businessId = getPersonalBusinessId();
         await requireAdminUser(decoded);
+        const settingsJson = await getBusinessSettingsJson(businessId);
 
         const appointmentId = Number(req.params.id);
         if (!appointmentId) throw httpError(400, "appointment id zorunlu");
@@ -5237,17 +5264,22 @@ const ScopedControllers = {
         const msg = `Ercan İncirkuş Berber Dükkanı - Merhaba ${appt.customer_name || "Musteri"}, randevunuz ${dateStr} tarihinde ${timeStr} saatinde ${appt.service_name || "hizmet"} icin hatirlatilir. Sagliklar!`;
 
         try {
-            await sendSms({
-                appointment_id: appointmentId,
+            const result = await sendNotification({
+                template: 'appointment_reminder',
                 phone: phone,
-                message: msg,
-                type: "reminder",
-                source: "manual"
+                headerVars: ['Ercan İncirkuş Berber Dükkanı'],
+                bodyVars: ['Ercan İncirkuş Berber Dükkanı', `${dateStr} ${timeStr}`],
+                appointment_id: appointmentId,
+                type: 'appointment_reminder',
+                source: 'manual'
             });
-            return res.json({ ok: true, message: "SMS gonderildi" });
-        } catch (smsErr) {
-            console.error("Hatirlatma SMS gonderilemedi:", smsErr);
-            throw httpError(500, "SMS gonderilemedi");
+            if (result.skipped) {
+                return res.json({ ok: true, message: "Bildirim ayarı kapalı" });
+            }
+            return res.json({ ok: true, message: "Bildirim gönderildi" });
+        } catch (err) {
+            console.error("Hatirlatma gönderilemedi:", err);
+            throw httpError(500, "Bildirim gönderilemedi");
         }
     }),
 
@@ -5406,6 +5438,8 @@ const ScopedControllers = {
     periodSettingsDelete: asyncWrap(async (req, res) => {
         const decoded = requireUser(req);
         await requireAdminUser(decoded);
+        const businessId = getPersonalBusinessId();
+        const settingsJson = await getBusinessSettingsJson(businessId);
 
         const id = Number(req.params.id);
         if (!id) throw httpError(400, "id zorunlu");
@@ -5458,7 +5492,7 @@ const ScopedControllers = {
             );
 
             // SMS gönder
-            if (sendSmsFlag && cancelAppts.length) {
+            if (settingsJson.sms_appointment_cancel === true && sendSmsFlag && cancelAppts.length) {
                 for (const appt of cancelAppts) {
                     await sendCancellationSms(appt, psRows[0].start_date, psRows[0].end_date);
                 }
