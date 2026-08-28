@@ -274,25 +274,74 @@ function generateSlotsV2Engine(input) {
         });
     }
 
-    // ====== STEP 7: Filter Past Times for Today ======
+    // ====== STEP 7: Filter Past Times for Today (REWRITTEN) ======
+    // Three-way filter: drop fully-past, mark currently-running as 'inProgress', keep future as-is.
+    // Day-end / full-day-closure fallbacks rewrite only when semantically correct.
     let filteredSlots = slots;
-    if (isToday && currentMinute !== null) {
-        filteredSlots = slots.filter(slot => {
-            const slotStartMin = parseHHMM(slot.start);
-            return slotStartMin >= currentMinute;
-        });
-    }
+    let dayAlreadyOver = false;
+    let dayFullyClosed = false;
 
-    // Eğer tüm slotlar filtrelendiyse (geçen saat) ama gün boyunca closure varsa
-    // → engine boş dönmemeli. Closure tüm günü kapsıyorsa bugün bile tüm gün "closed" olmalı
-    if (filteredSlots.length === 0 && slots.length > 0) {
-        // Tüm slotlar "geçmiş saat" yüzünden filtrelendi — fallback olarak hepsini "closed" yap
-        filteredSlots = slots.map(s => ({ ...s, status: 'closed' }));
+    if (isToday && currentMinute !== null) {
+        const closeMin = parseHHMM(endHour);
+
+        // Durum A: Gün bitti (currentMinute >= closeMin)
+        if (currentMinute >= closeMin) {
+            dayAlreadyOver = true;
+            filteredSlots = [];
+        } else {
+            // Üç-durumlu filtreleme
+            filteredSlots = slots.flatMap(slot => {
+                const slotStartMin = parseHHMM(slot.start);
+                const slotEndMin   = parseHHMM(slot.end);
+
+                // Tamamen geçmiş — at
+                if (slotEndMin <= currentMinute) return [];
+
+                // Şu anda devam ediyor — inProgress status'ü ile işaretle
+                // (currentMinute slot.start'a eşitse henüz başlamamış sayılır)
+                if (slotStartMin < currentMinute && slotEndMin > currentMinute) {
+                    if (slot.status === 'available') {
+                        return [{ ...slot, status: 'inProgress' }];
+                    }
+                    return [slot]; // busy/closed/notAvailable — koru
+                }
+
+                // Gelecek — olduğu gibi koru
+                return [slot];
+            });
+
+            // Full-day closure sinyali: flatMap sonrası tüm slotlar non-available ise
+            // (örn. tüm gün closure + isToday=true)
+            if (filteredSlots.length > 0 && filteredSlots.every(s => s.status !== 'available')) {
+                const allClosed = filteredSlots.every(s => s.status === 'closed');
+                if (allClosed) {
+                    dayFullyClosed = true;
+                }
+            }
+
+            // Fallback (yeniden yazıldı): sadece gerçek full-day closure durumunda tüm günü closed yap
+            if (filteredSlots.length === 0 && slots.length > 0) {
+                const hasAnyNonAvailable = slots.some(s =>
+                    s.status === 'busy' || s.status === 'closed' || s.status === 'notAvailable'
+                );
+                if (hasAnyNonAvailable) {
+                    // Gerçek closure var — orijinal status'ları koru
+                    filteredSlots = slots;
+                    dayFullyClosed = true;
+                } else {
+                    // Hepsi available'dı ama hepsi geçmiş — gün bitti
+                    filteredSlots = [];
+                    dayAlreadyOver = true;
+                }
+            }
+        }
     }
 
     // ====== STEP 8: Build Response ======
     return {
         slots: filteredSlots,
+        dayAlreadyOver,
+        dayFullyClosed,
         settings: {
             open_time: startHour,
             close_time: endHour,

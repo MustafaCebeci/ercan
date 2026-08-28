@@ -71,10 +71,10 @@ async function seed() {
         // ===== 4. SERVICES (skip if exists - check by name) =====
         console.log("📝 Creating services...");
         const services = [
-            { name: "Saç Kesimi", duration_minutes: 30, price: 150 },
-            { name: "Saç & Sakal", duration_minutes: 45, price: 200 },
-            { name: "Sakal Kesimi", duration_minutes: 20, price: 100 },
-            { name: "Cilt Bakımı", duration_minutes: 60, price: 250 },
+            { name: "Saç Kesimi", duration_minutes: 30, price: 150, is_default: 1 },
+            { name: "Saç & Sakal", duration_minutes: 45, price: 200, is_default: 0 },
+            { name: "Sakal Kesimi", duration_minutes: 20, price: 100, is_default: 0 },
+            { name: "Cilt Bakımı", duration_minutes: 60, price: 250, is_default: 0 },
         ];
 
         const existingServices = await Models.services.list();
@@ -92,6 +92,7 @@ async function seed() {
                     duration_minutes: svc.duration_minutes,
                     price: svc.price,
                     is_active: 1,
+                    is_default: svc.is_default,
                 });
                 serviceIds.push(id);
                 console.log(`   ✓ Service: ${svc.name} (ID: ${id})`);

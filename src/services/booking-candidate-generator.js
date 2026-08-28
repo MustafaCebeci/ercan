@@ -38,11 +38,15 @@ function minutesToHHMM(mins) {
  * @param {number} input.serviceDuration - Service duration in minutes
  * @param {Object} input.workingHours - { start: 'HH:MM', end: 'HH:MM' }
  * @param {Array} input.staticSlots - Static slots [{start, end}, ...]
+ * @param {number|null} input.currentMinute - Şu anki dakika (inProgress'leri parçalamak için)
  * @returns {Array} Bookable slots [{start, end, status}, ...]
  *
  * Rules:
  * - busy/closed segments are kept ATOMIC (not split by service duration)
  * - available segments are split by service duration
+ * - inProgress segments are split by service duration; each split chunk
+ *   is re-classified: if slot.start <= currentMinute < slot.end → inProgress,
+ *   if slot.start > currentMinute → available, if slot.end <= currentMinute → past
  * - short tails (remaining time < serviceDuration) are marked notAvailable
  * - static slots override service duration behavior
  * - empty timeline treated as all available within working hours
@@ -52,7 +56,8 @@ function generateBookableSlots(input) {
         timeline = [],
         serviceDuration = 60,
         workingHours = { start: '09:00', end: '21:00' },
-        staticSlots = []
+        staticSlots = [],
+        currentMinute = null
     } = input;
 
     const openMin = parseHHMM(workingHours.start);
@@ -94,7 +99,7 @@ function generateBookableSlots(input) {
         const segStart = parseHHMM(seg.start);
         const segEnd = parseHHMM(seg.end);
 
-        // ATOMIC: busy or closed segments are kept intact
+        // ATOMIC: busy / closed segments are kept intact
         if (seg.status === 'busy' || seg.status === 'closed') {
             result.push({
                 start: seg.start,
@@ -104,8 +109,8 @@ function generateBookableSlots(input) {
             continue;
         }
 
-        // AVAILABLE segment: split by service duration
-        if (seg.status === 'available') {
+        // inProgress / available segments: split by service duration
+        if (seg.status === 'inProgress' || seg.status === 'available') {
             let time = segStart;
 
             while (time + duration <= segEnd) {
@@ -113,10 +118,21 @@ function generateBookableSlots(input) {
 
                 // Skip if this slot is covered by a static slot (will be handled separately)
                 if (!isInStaticSlot(time, candEnd)) {
+                    // Her alt slot için currentMinute'a göre status belirle
+                    let chunkStatus = 'available';
+                    if (seg.status === 'inProgress' && currentMinute !== null) {
+                        if (time < currentMinute && candEnd > currentMinute) {
+                            chunkStatus = 'inProgress';
+                        } else if (candEnd <= currentMinute) {
+                            // Tüm slot geçmişti → at (engine zaten filtrelemiş olmalı)
+                            time += duration;
+                            continue;
+                        }
+                    }
                     result.push({
                         start: minutesToHHMM(time),
                         end: minutesToHHMM(candEnd),
-                        status: 'available'
+                        status: chunkStatus
                     });
                 }
 

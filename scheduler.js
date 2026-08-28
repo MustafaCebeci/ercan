@@ -219,13 +219,16 @@ async function sendReminders() {
                 continue;
             }
 
-            // Daha önce hatırlatma gönderilmiş mi?
-            const [sent] = await pool.execute(`
+            // Daha önce hatırlatma gönderilmiş mi? (SMS veya WhatsApp)
+            const [existingReminder] = await pool.execute(`
                 SELECT id FROM sms_messages
                 WHERE appointment_id = ? AND type = 'reminder' AND status = 'sent'
-            `, [appt.id]);
+                UNION
+                SELECT id FROM whatsapp_messages
+                WHERE appointment_id = ? AND type = 'reminder' AND status = 'sent'
+            `, [appt.id, appt.id]);
 
-            if (sent.length > 0) {
+            if (existingReminder.length > 0) {
                 console.log(`[SCHEDULER] Randevu ${appt.id} için hatırlatma zaten gönderilmiş`);
                 continue;
             }

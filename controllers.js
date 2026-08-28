@@ -17,6 +17,17 @@ function asyncWrap(fn) {
     return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 }
 
+/**
+ * Accepts true/false, 0/1, "0"/"1". Returns:
+ *   1 → truthy, 0 → falsy, undefined → key omitted, null → invalid input.
+ */
+function normalizeBool(v) {
+    if (v === undefined || v === null) return undefined;
+    if (v === true || v === 1 || v === "1" || v === "true" || v === "TRUE") return 1;
+    if (v === false || v === 0 || v === "0" || v === "false" || v === "FALSE") return 0;
+    return null;
+}
+
 const DEFAULT_STAFF_IMAGE = "/assets/ni.png";
 
 function getPersonalBusinessId() {
@@ -4018,18 +4029,34 @@ VALUES
         // Import at runtime to avoid circular deps
         const { generateBookableSlots } = require("./src/services/booking-candidate-generator.js");
 
-        const bookableSlots = generateBookableSlots({
-            timeline: engineResult.slots,
-            serviceDuration: duration,
-            workingHours: { start: startHour, end: endHour },
-            staticSlots: staticSlots
-        });
+        // Eğer gün bitti (dayAlreadyOver) veya tüm gün kapalı (dayFullyClosed),
+        // candidate generator'ı ATLA — boş timeline'da default olarak tüm günü
+        // available yapıyor, bu da bug fix sinyallerini override ederdi.
+        let bookableSlots;
+        if (engineResult.dayAlreadyOver) {
+            bookableSlots = [];
+        } else if (engineResult.dayFullyClosed) {
+            bookableSlots = engineResult.slots;
+        } else {
+            bookableSlots = generateBookableSlots({
+                timeline: engineResult.slots,
+                serviceDuration: duration,
+                workingHours: { start: startHour, end: endHour },
+                staticSlots: staticSlots,
+                currentMinute: isToday ? currentMinute : null
+            });
+        }
 
         return res.json({
             ok: true,
             date: targetDate,
             slots: bookableSlots,
-            settings: engineResult.settings
+            settings: engineResult.settings,
+            meta: {
+                dayAlreadyOver: engineResult.dayAlreadyOver,
+                dayFullyClosed: engineResult.dayFullyClosed,
+                isToday,
+            }
         });
     }),
 
@@ -4841,12 +4868,47 @@ const ScopedControllers = {
             throw httpError(400, "duration_minutes zorunlu");
         }
 
-        const id = await Models.services.create({
+        let isDefault = normalizeBool(body.is_default);
+        if (isDefault === null) throw httpError(400, "is_default invalid (0/1/true/false)");
+        if (isDefault === undefined) isDefault = 0;
+
+        const insertPayload = {
             name,
             duration_minutes: durationMinutes,
             price: priceValue,
-            is_active: isActive ? 1 : 0
-        });
+            is_active: isActive ? 1 : 0,
+            is_default: isDefault,
+        };
+
+        // Tek-varsayılan kuralı: is_default = 1 set ediliyorsa
+        // diğer satırları transaction içinde 0'a çekip bu satırı ekle.
+        if (isDefault === 1) {
+            const conn = await pool.getConnection();
+            try {
+                await conn.beginTransaction();
+                await conn.execute(`UPDATE services SET is_default = 0 WHERE is_default = 1`);
+                const [result] = await conn.execute(
+                    `INSERT INTO services (name, duration_minutes, price, is_active, is_default)
+                     VALUES (?, ?, ?, ?, ?)`,
+                    [
+                        insertPayload.name,
+                        insertPayload.duration_minutes,
+                        insertPayload.price,
+                        insertPayload.is_active,
+                        insertPayload.is_default,
+                    ]
+                );
+                await conn.commit();
+                return res.status(201).json({ ok: true, id: result.insertId ?? null });
+            } catch (err) {
+                try { await conn.rollback(); } catch (_) { /* ignore */ }
+                throw err;
+            } finally {
+                try { conn.release(); } catch (_) { /* ignore */ }
+            }
+        }
+
+        const id = await Models.services.create(insertPayload);
         return res.status(201).json({ ok: true, id });
     }),
 
@@ -4878,6 +4940,60 @@ const ScopedControllers = {
         }
         if (body.is_active !== undefined) payload.is_active = body.is_active ? 1 : 0;
         if (body.sound_id !== undefined) payload.sound_id = body.sound_id;
+
+        // is_default body'sinde varsa normalize et; payload'a ekle ve
+        // tek-varsayılan kuralını kontrol et.
+        let wantsDefault = false;
+        if (body.is_default !== undefined) {
+            const normalized = normalizeBool(body.is_default);
+            if (normalized === null) {
+                throw httpError(400, "is_default invalid (0/1/true/false)");
+            }
+            wantsDefault = true;
+            payload.is_default = normalized;
+
+            // is_default = 0 set ediliyorsa ve bu satır tek default ise reddet.
+            if (normalized === 0) {
+                const [defaultRows] = await pool.execute(
+                    `SELECT id FROM services WHERE is_default = 1`
+                );
+                const onlyThisIsDefault =
+                    defaultRows.length === 1 &&
+                    Number(defaultRows[0].id) === Number(id);
+                if (onlyThisIsDefault) {
+                    throw httpError(400, "önce başka bir servisi varsayılan yapın");
+                }
+            }
+        }
+
+        // is_default değişiyorsa transaction içinde uygula ki singleton
+        // kuralı bozulmasın.
+        if (wantsDefault) {
+            const conn = await pool.getConnection();
+            try {
+                await conn.beginTransaction();
+                if (payload.is_default === 1) {
+                    await conn.execute(
+                        `UPDATE services SET is_default = 0 WHERE is_default = 1 AND id <> ?`,
+                        [id]
+                    );
+                }
+                const setParts = Object.keys(payload).map((k) => `${k} = ?`);
+                const setSql = setParts.join(", ");
+                const params = Object.values(payload);
+                await conn.execute(
+                    `UPDATE services SET ${setSql} WHERE id = ?`,
+                    [...params, id]
+                );
+                await conn.commit();
+                return res.json({ ok: true });
+            } catch (err) {
+                try { await conn.rollback(); } catch (_) { /* ignore */ }
+                throw err;
+            } finally {
+                try { conn.release(); } catch (_) { /* ignore */ }
+            }
+        }
 
         const ok = await Models.services.update({ id }, payload);
         if (!ok) return res.status(404).json({ ok: false, message: "Not found" });

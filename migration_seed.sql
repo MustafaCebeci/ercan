@@ -23,12 +23,12 @@ VALUES (1, 'Mustafa Admin', '5467473915', NULL, 1, NULL, NULL);
 -- ----------------------------------------------------------
 -- 3. SERVICES
 -- ----------------------------------------------------------
-INSERT INTO services (id, name, duration_minutes, price, is_active, created_at, updated_at)
+INSERT INTO services (id, name, duration_minutes, price, is_active, is_default, created_at, updated_at)
 VALUES
-    (1, 'Saç Kesimi', 30, 150, 1, NULL, NULL),
-    (2, 'Saç & Sakal', 45, 200, 1, NULL, NULL),
-    (3, 'Sakal Kesimi', 20, 100, 1, NULL, NULL),
-    (4, 'Cilt Bakımı', 60, 250, 1, NULL, NULL);
+    (1, 'Saç Kesimi', 30, 150, 1, 1, NULL, NULL),
+    (2, 'Saç & Sakal', 45, 200, 1, 0, NULL, NULL),
+    (3, 'Sakal Kesimi', 20, 100, 1, 0, NULL, NULL),
+    (4, 'Cilt Bakımı', 60, 250, 1, 0, NULL, NULL);
 
 -- ----------------------------------------------------------
 -- 4. SERVICE_PROVIDERS

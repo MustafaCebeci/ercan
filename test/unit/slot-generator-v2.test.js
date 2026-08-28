@@ -364,9 +364,19 @@ describe('generateSlotsV2Engine', () => {
 
             const result = generateSlotsV2Engine(input);
 
+            // Past slots dropped, in-progress kept as 'inProgress'
             result.slots.forEach(slot => {
+                const endMin = parseHHMM(slot.end);
                 const startMin = parseHHMM(slot.start);
-                expect(startMin).toBeGreaterThanOrEqual(14 * 60 + 17);
+                // Slot ya gelecekte ya da şu anda devam ediyor olmalı
+                expect(endMin).toBeGreaterThan(14 * 60 + 17);
+                if (startMin <= 14 * 60 + 17 && endMin > 14 * 60 + 17) {
+                    // Devam eden slot inProgress olmalı
+                    expect(slot.status).toBe('inProgress');
+                } else {
+                    // Gelecek slot available olmalı
+                    expect(slot.status).toBe('available');
+                }
             });
         });
 
@@ -380,6 +390,193 @@ describe('generateSlotsV2Engine', () => {
             const result = generateSlotsV2Engine(input);
 
             expect(result.slots.some(s => s.start === '09:00')).toBe(true);
+        });
+    });
+
+    // ===== TEST GROUP 14A: Today Filter Edge Cases (Bug Fix Coverage) =====
+    describe('TEST GROUP 14A: Today Filter Edge Cases', () => {
+        // 1. currentMinute > son fitting slot başlangıcı → fallback: empty + dayAlreadyOver
+        it('returns empty + dayAlreadyOver when no slot fits after currentMinute', () => {
+            const input = buildInput({
+                workingHours: { start: '09:00', end: '14:00' },
+                serviceDuration: 45,
+                isToday: true,
+                currentMinute: 14 * 60 + 30, // 14:30, after close 14:00
+            });
+            const result = generateSlotsV2Engine(input);
+            expect(result.slots).toEqual([]);
+            expect(result.dayAlreadyOver).toBe(true);
+            expect(result.dayFullyClosed).toBe(false);
+        });
+
+        // 2. currentMinute >= closeMin
+        it('returns empty + dayAlreadyOver when currentMinute equals closeMin', () => {
+            const input = buildInput({
+                workingHours: { start: '09:00', end: '18:00' },
+                serviceDuration: 60,
+                isToday: true,
+                currentMinute: 18 * 60,
+            });
+            const result = generateSlotsV2Engine(input);
+            expect(result.slots).toEqual([]);
+            expect(result.dayAlreadyOver).toBe(true);
+        });
+
+        it('returns empty + dayAlreadyOver when currentMinute > closeMin', () => {
+            const input = buildInput({
+                workingHours: { start: '09:00', end: '18:00' },
+                serviceDuration: 60,
+                isToday: true,
+                currentMinute: 23 * 60 + 30,
+            });
+            const result = generateSlotsV2Engine(input);
+            expect(result.slots).toEqual([]);
+            expect(result.dayAlreadyOver).toBe(true);
+        });
+
+        // 3. isToday=true + tüm gün closure → dayFullyClosed=true
+        it('keeps closed status for full-day closure when isToday is true', () => {
+            const input = buildInput({
+                workingHours: { start: '09:00', end: '18:00' },
+                closures: [{
+                    start: '2026-06-10T00:00',
+                    end: '2026-06-10T23:59',
+                    scope: 'global',
+                    is_all_day: 1,
+                }],
+                isToday: true,
+                currentMinute: 10 * 60, // 10:00
+            });
+            const result = generateSlotsV2Engine(input);
+            expect(result.slots.length).toBeGreaterThan(0);
+            expect(result.slots.every(s => s.status === 'closed')).toBe(true);
+            expect(result.dayFullyClosed).toBe(true);
+            expect(result.dayAlreadyOver).toBe(false);
+        });
+
+        // 4. currentMinute < openMin (gün henüz başlamamış)
+        it('returns all slots as available when currentMinute is before open time', () => {
+            const input = buildInput({
+                workingHours: { start: '09:00', end: '18:00' },
+                serviceDuration: 60,
+                isToday: true,
+                currentMinute: 7 * 60, // 07:00, before open
+            });
+            const result = generateSlotsV2Engine(input);
+            expect(result.slots.length).toBeGreaterThan(0);
+            expect(result.slots.every(s => s.status === 'available')).toBe(true);
+            expect(result.dayAlreadyOver).toBe(false);
+            expect(result.dayFullyClosed).toBe(false);
+        });
+
+        // 5. Slot devam ediyor (currentMinute slot içinde) → status inProgress
+        it('marks slot as inProgress when currentMinute is within slot range', () => {
+            // Tek 60 dk'lık available segment, currentMinute slot ortasında
+            const input = buildInput({
+                workingHours: { start: '14:00', end: '15:00' },
+                serviceDuration: 60,
+                isToday: true,
+                currentMinute: 14 * 60 + 20, // 14:20 — slot 14:00-15:00 devam ediyor
+            });
+            const result = generateSlotsV2Engine(input);
+            // Engine tek bir timeline segmenti döner, şu an devam ediyorsa inProgress olmalı
+            expect(result.slots.length).toBe(1);
+            expect(result.slots[0].status).toBe('inProgress');
+            expect(result.slots[0].start).toBe('14:00');
+            expect(result.slots[0].end).toBe('15:00');
+        });
+
+        // 6. currentMinute === slot.start → slot available kalır
+        it('keeps slot as available when currentMinute exactly equals slot.start', () => {
+            const input = buildInput({
+                workingHours: { start: '14:00', end: '15:00' },
+                serviceDuration: 60,
+                isToday: true,
+                currentMinute: 14 * 60,
+            });
+            const result = generateSlotsV2Engine(input);
+            expect(result.slots.length).toBe(1);
+            expect(result.slots[0].status).toBe('available');
+        });
+
+        // 7. Karışık: past busy + current available + future available
+        it('drops fully-past appointments, marks current as inProgress, keeps future', () => {
+            const input = buildInput({
+                workingHours: { start: '09:00', end: '18:00' },
+                serviceDuration: 60,
+                appointments: [
+                    { start: '10:00', end: '11:00' }, // fully past
+                ],
+                isToday: true,
+                currentMinute: 11 * 60 + 30, // 11:30
+            });
+            const result = generateSlotsV2Engine(input);
+            // 10:00-11:00 tamamen geçmiş → atılmalı
+            const pastAppt = result.slots.find(s =>
+                parseHHMM(s.start) >= 10 * 60 && parseHHMM(s.end) <= 11 * 60
+            );
+            expect(pastAppt).toBeUndefined();
+            // Hiçbir slot endMin <= 11:30 olmamalı
+            for (const s of result.slots) {
+                expect(parseHHMM(s.end)).toBeGreaterThan(11 * 60 + 30);
+            }
+        });
+
+        // 8. Fallback: tüm slotlar busy → busy status korunur, closed'a dönüşmez
+        it('preserves busy status in fallback when no non-busy slot remains', () => {
+            const input = buildInput({
+                workingHours: { start: '09:00', end: '11:00' },
+                serviceDuration: 30,
+                appointments: [{ start: '09:00', end: '11:00' }], // tamamen busy
+                isToday: true,
+                currentMinute: 8 * 60 + 55, // 08:55 — henüz başlamamış
+            });
+            const result = generateSlotsV2Engine(input);
+            // currentMinute < openMin olduğu için tüm slotlar available (busy dahil) kalmalı
+            const busySlots = result.slots.filter(s => s.status === 'busy');
+            expect(busySlots.length).toBeGreaterThan(0);
+            expect(result.dayAlreadyOver).toBe(false);
+            expect(result.dayFullyClosed).toBe(false);
+        });
+
+        // 9. Geçmiş appointment + currentMinute ondan önce → appointment status korunur
+        it('keeps past busy appointment segment when currentMinute is earlier than openMin', () => {
+            const input = buildInput({
+                workingHours: { start: '09:00', end: '18:00' },
+                appointments: [
+                    { start: '10:00', end: '11:00' },
+                ],
+                isToday: true,
+                currentMinute: 6 * 60, // 06:00 — gün başlamamış
+            });
+            const result = generateSlotsV2Engine(input);
+            // Busy segment korunmalı
+            const busy = result.slots.filter(s => s.status === 'busy');
+            expect(busy.length).toBeGreaterThan(0);
+        });
+
+        // 10. currentMinute tam slot ortasında → inProgress
+        it('marks only the currently running segment as inProgress', () => {
+            const input = buildInput({
+                workingHours: { start: '13:00', end: '17:00' },
+                serviceDuration: 60,
+                appointments: [
+                    { start: '14:00', end: '15:00' }, // şu an devam eden
+                ],
+                isToday: true,
+                currentMinute: 14 * 60 + 15, // 14:15
+            });
+            const result = generateSlotsV2Engine(input);
+            // Devam eden appointment 'busy' kalır (zaten non-available)
+            const runningAppt = result.slots.find(s =>
+                s.status === 'busy' && s.start === '14:00'
+            );
+            expect(runningAppt).toBeDefined();
+            // Available slot 13:00-14:00 tamamen geçmiş → atılmalı
+            const pastAvailable = result.slots.find(s =>
+                s.status === 'available' && s.start === '13:00'
+            );
+            expect(pastAvailable).toBeUndefined();
         });
     });
 
