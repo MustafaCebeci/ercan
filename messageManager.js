@@ -155,10 +155,12 @@ async function sendNotification({
     const waApi = createWhatsAppProvider();
     const components = buildWaComponents(template, headerVars, bodyVars);
 
-    try {
-      const resp = await waApi.sendTemplate(phone, tpl.name, components, tpl.lang);
-      const waMsgId = resp?.wa_message_id ?? resp?.message_id ?? null;
+    // WhatsApp gönder — hata olursa direkt catch'e düşer
+    const resp = await waApi.sendTemplate(phone, tpl.name, components, tpl.lang);
+    const waMsgId = resp?.wa_message_id ?? resp?.message_id ?? null;
 
+    // DB log — hata olursa bildir ama mesaj gitmiş sayılır
+    try {
       await logWhatsAppToDb({
         appointment_id,
         customer_id,
@@ -171,24 +173,12 @@ async function sendNotification({
         error_message: null,
         source,
       });
-
-      return { channel: 'wa', ok: true, message_id: waMsgId };
-    } catch (e) {
-      const errText = e?.message || String(e);
-      await logWhatsAppToDb({
-        appointment_id,
-        customer_id,
-        to_phone: phone,
-        body: JSON.stringify({ template: tpl.name, components }),
-        type,
-        provider: 'whatsapp_cloud',
-        status: 'failed',
-        wa_message_id: null,
-        error_message: errText,
-        source,
-      });
-      throw new Error(errText);
+    } catch (logErr) {
+      // DB log başarısız ama mesaj gitmiş — uyarı ver ve devam et
+      console.error(`[messageManager] WhatsApp log hatası (mesaj gitti): ${logErr.message}`);
     }
+
+    return { channel: 'wa', ok: true, message_id: waMsgId };
   } else {
     // SMS kanalı — setting kontrolü
     const settingKey = TEMPLATE_SMS_SETTING[template];

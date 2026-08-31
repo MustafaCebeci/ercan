@@ -118,7 +118,20 @@ class WhatsAppCloudProvider extends WhatsAppProvider {
             timeout: this.timeout
         });
 
-        return response.data;
+        const data = response.data;
+
+        // WhatsApp API error response check
+        if (data.error) {
+            const errMsg = data.error?.message || JSON.stringify(data.error);
+            throw new Error(`WhatsApp API Error: ${errMsg}`);
+        }
+
+        // HTTP status check (200/201 dışında hata varsa)
+        if (response.status !== 200 && response.status !== 201) {
+            throw new Error(`WhatsApp API HTTP Error: ${response.status} - ${JSON.stringify(data)}`);
+        }
+
+        return data;
     }
 
     /**
