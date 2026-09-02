@@ -13,6 +13,23 @@ const { createWhatsAppProvider } = require("./whatsapp.js");
 // Message manager - lazy require to avoid circular dependency
 // const { sendNotification } = require("./messageManager");
 
+// Caller'ın logical type adı -> DB ENUM değeri.
+// Listede olmayan type'lar 'other' fallback olur (mevcut davranış).
+const TYPE_ALIAS = {
+    appointment_reminder: 'reminder',
+    reminder: 'reminder',
+    otp: 'otp',
+    other: 'other',
+};
+
+// 'cancellation' sadece whatsapp_messages için geçerli;
+// sms_messages'a düşerse 'other' fallback olur (ENUM hatası olmaz).
+function normalizeType(logicalType, channel /* 'sms' | 'wa' */) {
+    const mapped = TYPE_ALIAS[logicalType] ?? 'other';
+    if (channel === 'sms' && mapped === 'cancellation') return 'other';
+    return mapped;
+}
+
 // --- OTP yardımcıları ---
 function generateOtpCode() {
     return String(Math.floor(100000 + Math.random() * 900000));
@@ -119,9 +136,8 @@ async function logWhatsAppToDb({
     error_message = null,
     source = "system",
 }) {
-    // Normalize type to valid ENUM: ('reminder', 'otp', 'cancellation', 'other')
-    const validTypes = ['reminder', 'otp', 'cancellation', 'other'];
-    const normalizedType = validTypes.includes(type) ? type : 'other';
+    // Normalize type to valid whatsapp_messages ENUM
+    const normalizedType = normalizeType(type, 'wa');
 
     const now = t.toISODateTime(t.now());
     const sentAt = status === 'sent' ? now : null;
@@ -162,9 +178,8 @@ function createSmsApi() {
  * - sms_messages loglar
  */
 async function sendSms({ appointment_id = null, phone, message, type = "otp", source = "system" }) {
-    // Map template type to valid sms_messages ENUM type
-    const validTypes = ['reminder', 'otp', 'other'];
-    const normalizedType = validTypes.includes(type) ? type : 'other';
+    // Normalize type to valid sms_messages ENUM
+    const normalizedType = normalizeType(type, 'sms');
 
     const smsApi = createSmsApi();
     const providerName = smsApi.getProviderName();
