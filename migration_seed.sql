@@ -10,7 +10,7 @@
 INSERT INTO app_settings (id, settings_json, updated_at)
 VALUES (
  1,
-    '{"end_hour": "20:30", "start_hour": "09:30", "closed_days": [0], "sms_reminder": true, "no_show_limit": 3, "reminder_hours": 6, "otp_ttl_seconds": 60, "sms_notification": true, "no_show_window_hours": 24, "cancel_deadline_hours": 2, "no_show_grace_minutes": 30, "booking_coming_day_range": 2, "multiple_appointment_count": 8, "scheduler_interval_minutes": 15}',
+    '{"end_hour": "20:30", "start_hour": "09:30", "closed_days": [0], "sms_reminder": true, "reminder_hours": 6, "otp_ttl_seconds": 60, "sms_notification": true, "cancel_deadline_hours": 2, "auto_mark_grace_minutes": 30, "auto_no_show_status": "no_show", "booking_coming_day_range": 2, "multiple_appointment_count": 8, "scheduler_interval_minutes": 15}',
     NULL
 );
 

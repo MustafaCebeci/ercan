@@ -1,7 +1,7 @@
 // test/integration/scheduler.test.js
 /**
  * Scheduler Integration Tests
- * runJobs, isBusinessOpen, markNoShows, sendReminders
+ * runJobs, isBusinessOpen, autoMarkAppointments, sendReminders
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -70,11 +70,11 @@ describe('scheduler.runJobs()', () => {
 
     await scheduler.runJobs();
 
-    // Should not call markNoShows or sendReminders
+    // Should not call autoMarkAppointments or sendReminders
     // The implementation shows this by returning early
   });
 
-  it('executes markNoShows and sendReminders when business is open', async () => {
+  it('executes autoMarkAppointments and sendReminders when business is open', async () => {
     mockPool.execute
       .mockResolvedValueOnce([[{
         settings_json: JSON.stringify({
@@ -82,7 +82,7 @@ describe('scheduler.runJobs()', () => {
           end_hour: '22:00',
         })
       }]]) // isBusinessOpen
-      .mockResolvedValueOnce([[]]) // markNoShows (no expired appointments)
+      .mockResolvedValueOnce([[]]) // autoMarkAppointments (no expired appointments)
       .mockResolvedValueOnce([[]]) // sendReminders (no reminders to send)
 
     await scheduler.runJobs();
@@ -210,24 +210,22 @@ describe('scheduler.isBusinessOpen()', () => {
   });
 });
 
-describe('scheduler.markNoShows()', () => {
+describe('scheduler.autoMarkAppointments()', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('marks appointments as no_show when end_at is past grace period', async () => {
+  it('marks appointments as no_show when end_at is past grace period (default)', async () => {
     mockPool.execute
-      .mockResolvedValueOnce([[{
-        settings_json: JSON.stringify({
-          no_show_grace_minutes: 30,
-          no_show_window_hours: 24,
-        })
-      }]])
+      .mockResolvedValueOnce([[{ settings_json: '{}' }]])
       .mockResolvedValueOnce([{ affectedRows: 3 }]);
 
-    await scheduler.markNoShows();
+    await scheduler.autoMarkAppointments();
 
     expect(mockPool.execute).toHaveBeenCalledTimes(2);
+    // Default target status should be 'no_show'
+    const updateCall = mockPool.execute.mock.calls[1][0];
+    expect(updateCall).toContain("status = ?");
   });
 
   it('does nothing when no appointments to mark', async () => {
@@ -235,31 +233,112 @@ describe('scheduler.markNoShows()', () => {
       .mockResolvedValueOnce([[{ settings_json: '{}' }]])
       .mockResolvedValueOnce([{ affectedRows: 0 }]);
 
-    await scheduler.markNoShows();
+    await scheduler.autoMarkAppointments();
 
     // Should have called execute but affectedRows is 0
   });
 
-  it('logs number of marked no-shows', async () => {
+  it('logs number of marked appointments', async () => {
     mockPool.execute
-      .mockResolvedValueOnce([[{ settings_json: JSON.stringify({ no_show_grace_minutes: 30 }) }]])
+      .mockResolvedValueOnce([[{ settings_json: JSON.stringify({ auto_mark_grace_minutes: 30 }) }]])
       .mockResolvedValueOnce([{ affectedRows: 5 }]);
 
-    // Console.log is captured by vitest
     const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await scheduler.markNoShows();
+    await scheduler.autoMarkAppointments();
 
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('5'));
+  });
+
+  it('skips UPDATE when auto_no_show_status is "none"', async () => {
+    mockPool.execute
+      .mockResolvedValueOnce([[{
+        settings_json: JSON.stringify({ auto_no_show_status: 'none' })
+      }]]);
+
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await scheduler.autoMarkAppointments();
+
+    // Only the SELECT should run; no UPDATE
+    expect(mockPool.execute).toHaveBeenCalledTimes(1);
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('devre dışı'));
+  });
+
+  it('updates to completed when auto_no_show_status is "completed"', async () => {
+    mockPool.execute
+      .mockResolvedValueOnce([[{
+        settings_json: JSON.stringify({
+          auto_no_show_status: 'completed',
+          auto_mark_grace_minutes: 15,
+        })
+      }]])
+      .mockResolvedValueOnce([{ affectedRows: 2 }]);
+
+    await scheduler.autoMarkAppointments();
+
+    expect(mockPool.execute).toHaveBeenCalledTimes(2);
+    // params: [targetStatus, graceMinutes]
+    const updateParams = mockPool.execute.mock.calls[1][1];
+    expect(updateParams).toEqual(['completed', 15]);
+  });
+
+  it('updates to cancelled with system fields when auto_no_show_status is "cancelled"', async () => {
+    mockPool.execute
+      .mockResolvedValueOnce([[{
+        settings_json: JSON.stringify({
+          auto_no_show_status: 'cancelled',
+          auto_mark_grace_minutes: 30,
+        })
+      }]])
+      .mockResolvedValueOnce([{ affectedRows: 4 }]);
+
+    await scheduler.autoMarkAppointments();
+
+    expect(mockPool.execute).toHaveBeenCalledTimes(2);
+    const updateCall = mockPool.execute.mock.calls[1][0];
+    // cancelled status should set system fields
+    expect(updateCall).toContain("'system'");
+    expect(updateCall).toContain('Otomatik işaretleme');
+    const updateParams = mockPool.execute.mock.calls[1][1];
+    expect(updateParams).toEqual(['cancelled', 30]);
+  });
+
+  it('does not set system fields when auto_no_show_status is "completed"', async () => {
+    mockPool.execute
+      .mockResolvedValueOnce([[{
+        settings_json: JSON.stringify({ auto_no_show_status: 'completed' })
+      }]])
+      .mockResolvedValueOnce([{ affectedRows: 1 }]);
+
+    await scheduler.autoMarkAppointments();
+
+    const updateCall = mockPool.execute.mock.calls[1][0];
+    // When completed, cancelled_by/cancel_reason should NOT be touched (no 'system' literal)
+    expect(updateCall).not.toContain("'system'");
+    expect(updateCall).not.toContain('Otomatik işaretleme');
+  });
+
+  it('falls back to no_show for invalid auto_no_show_status values', async () => {
+    mockPool.execute
+      .mockResolvedValueOnce([[{
+        settings_json: JSON.stringify({ auto_no_show_status: 'invalid_value' })
+      }]])
+      .mockResolvedValueOnce([{ affectedRows: 0 }]);
+
+    await scheduler.autoMarkAppointments();
+
+    const updateParams = mockPool.execute.mock.calls[1][1];
+    expect(updateParams[0]).toBe('no_show');
   });
 
   it('handles errors gracefully', async () => {
     mockPool.execute.mockRejectedValueOnce(new Error('DB error'));
 
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    await scheduler.markNoShows();
+    await scheduler.autoMarkAppointments();
 
-    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('markNoShows'));
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('autoMarkAppointments'));
   });
 });
 

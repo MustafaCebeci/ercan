@@ -39,14 +39,11 @@ function sha256(input) {
     return crypto.createHash("sha256").update(String(input)).digest("hex");
 }
 
-function otpMessage(code) {
-    return `Giriş kodunuz: ${code}. Bu kod 1 dakika geçerlidir.- Ercan İncirkuş Berber Dükkanı`;
-}
-
 /**
  * DB: otp_codes kaydı oluştur
  * user_type: 'staff_account' | 'customer'
- * otp_ttl_seconds: Ayarlardan çekilecek veya varsayılan 60 saniye
+ * ttlSeconds: Çağıran tarafından hesaplanır (settingsManager.getSetting('otp_ttl_seconds'))
+ *             Verilmezse 60 saniyeye fallback
  */
 async function createOtpRecord({
     user_type,
@@ -55,33 +52,12 @@ async function createOtpRecord({
     code,
     ttlSeconds = null,
 }) {
-    // Settings'den OTP TTL çek
-    let otpTtl = 60;
-    try {
-        const [rows] = await pool.execute(
-            `SELECT settings_json FROM app_settings LIMIT 1`
-        );
-        if (rows.length > 0) {
-            const raw = rows[0].settings_json;
-            console.log('[DEBUG createOtpRecord] raw settings_json:', raw, 'type:', typeof raw);
-            const settings = typeof raw === 'string' ? JSON.parse(raw || "{}") : (raw || {});
-            otpTtl = settings.otp_ttl_seconds ?? 60;
-            console.log('[DEBUG createOtpRecord] otpTtl from settings:', otpTtl);
-        }
-    } catch (err) {
-        console.error("[OTP] Settings okuma hatası, varsayılan kullanılıyor:", err.message);
-    }
-
-    const effectiveTtl = ttlSeconds ?? otpTtl;
-    console.log('[DEBUG createOtpRecord] effectiveTtl:', effectiveTtl);
+    const effectiveTtl = ttlSeconds ?? 60;
     const code_hash = sha256(code);
 
     // expires_at: Backend'de hesapla (MySQL NOW() kullanma - timezone sorunu olur)
     // db.sql'de expires_at VARCHAR(30) olarak tanımlı, DB'nin tarihe müdahalesi olmamalı
     const expiresAt = t.toISODateTime(t.now().add({ seconds: effectiveTtl }));
-
-    // [DEBUG] expires_at boyutu ve değeri
-    console.log('[DEBUG createOtpRecord] expiresAt:', expiresAt, 'length:', expiresAt.length);
 
     await pool.execute(
         `INSERT INTO otp_codes (user_type, user_id, destination, code_hash, expires_at)
@@ -292,6 +268,10 @@ async function sendOtp({ user_type, user_id, destinationOverride = null }) {
     const destination = destinationOverride;
     if (!destination) throw new Error("destinationOverride zorunlu (phone).");
 
+    // TTL'i tek seferde hesapla — hem DB expires_at hem SMS etiketi için aynı değeri kullanır
+    const { getSetting } = require('./settingsManager');
+    const ttlSeconds = (await getSetting('otp_ttl_seconds')) ?? 60;
+
     const code = generateOtpCode();
 
     await createOtpRecord({
@@ -299,25 +279,8 @@ async function sendOtp({ user_type, user_id, destinationOverride = null }) {
         user_id,
         destination,
         code,
-        ttlSeconds: 60,
+        ttlSeconds,
     });
-
-    const message = otpMessage(code);
-
-    // OTP her zaman gider — login_t1 template (setting kontrolü yok)
-    // otp_ttl_seconds settings'den al (varsayılan 60sn)
-    let ttlSeconds = 60;
-    try {
-        const [rows] = await pool.execute(
-            `SELECT settings_json FROM app_settings LIMIT 1`
-        );
-        if (rows.length > 0 && rows[0].settings_json) {
-            const s = typeof rows[0].settings_json === 'string'
-                ? JSON.parse(rows[0].settings_json)
-                : rows[0].settings_json;
-            ttlSeconds = s.otp_ttl_seconds ?? 60;
-        }
-    } catch {}
 
     const ttlLabel = ttlSeconds >= 60 ? `${Math.round(ttlSeconds / 60)} Dakika` : `${ttlSeconds} Saniye`;
 
