@@ -2,7 +2,7 @@
 // Harici cronjob manager tarafından 5 dakikada bir tetiklenir
 // İşlevler:
 //  1. İşletme açık mı kontrol et
-//  2. Geçmiş randevuları ayarlara göre otomatik işaretle (no_show, completed, cancelled veya atla)
+//  2. Geçmiş randevuları no_show olarak işaretle
 //  3. Yaklaşan randevulara hatırlatma SMS'i gönder
 
 const { pool } = require("./models");
@@ -26,8 +26,6 @@ async function runJobs() {
 
     try {
         console.log("[SCHEDULER] İşlemler başladı...");
-        console.log(`[SCHEDULER] Sunucu saati: ${new Date().toISOString()}`);
-        console.log(`[SCHEDULER] Temporal now: ${t.toISODateTime(t.now())}`);
 
         // 1. İşletme saatleri kontrolü
         const isOpen = await isBusinessOpen();
@@ -37,8 +35,10 @@ async function runJobs() {
             return;
         }
 
-        // 2. Otomatik işaretleme (auto_no_show_status ayarına göre)
-        await autoMarkAppointments();
+        // 2. No-show kontrolü (sadece auto_no_show açıksa)
+        if (await isAutoNoShowEnabled()) {
+            //await markNoShows();
+        }
 
         // 3. Hatırlatma SMS'leri
         await sendReminders();
@@ -84,19 +84,15 @@ async function isBusinessOpen() {
 
         // Kapalı gün kontrolü (closedDays veya closed_days)
         const closedDays = settings.closedDays || settings.closed_days || [];
+        if (closedDays.includes(day)) {
+            return false;
+        }
 
         // Çalışma saati kontrolü (start_hour/open_time ve end_hour/close_time ile uyumlu)
         const openHourStr = settings.start_hour ?? settings.open_time ?? "09:00";
         const closeHourStr = settings.end_hour ?? settings.close_time ?? "22:00";
         const openHour = parseInt(openHourStr.split(':')[0]);
         const closeHour = parseInt(closeHourStr.split(':')[0]);
-
-        console.log(`[SCHEDULER] isBusinessOpen — saat: ${hour}, gün: ${day} (1=Pzt, 7=Paz)`);
-        console.log(`[SCHEDULER] isBusinessOpen — çalışma: ${openHourStr}-${closeHourStr}, kapalı günler: ${JSON.stringify(closedDays)}`);
-
-        if (closedDays.includes(day)) {
-            return false;
-        }
 
         return hour >= openHour && hour < closeHour;
 
@@ -106,23 +102,37 @@ async function isBusinessOpen() {
     }
 }
 
-/**
- * Geçmiş confirmed randevuları ayarlardaki auto_no_show_status'a göre otomatik işaretle
- * - end_at (randevu bitiş saati) + grace period geçmiş randevular
- * - targetStatus: 'no_show' | 'completed' | 'cancelled' | 'confirmed' | 'none'
- *   'none' seçili ise hiçbir şey yapma
- * - cancelled_by / cancel_reason sadece 'cancelled' ve 'no_show' durumlarında set edilir
- * Not: 16:30'da 45dklık randevu -> end_at = 17:15, 17:45'te (grace=30) otomatik işaretlenir
- */
-async function autoMarkAppointments() {
+async function isAutoNoShowEnabled() {
     try {
-        // Ayarlardan hedef statü ve grace period çek
+        const [rows] = await pool.execute(
+            `SELECT settings_json FROM app_settings LIMIT 1`
+        );
+        if (!rows.length) return true;
+        let settings = rows[0].settings_json;
+        if (typeof settings === 'string') {
+            settings = JSON.parse(settings || '{}');
+        }
+        return settings?.auto_no_show === true;
+    } catch {
+        return true;
+    }
+}
+
+/**
+ * Geçmiş confirmed randevuları no_show olarak işaretle
+ * - end_at (randevu bitiş saati) geçmiş ve grace period ek süre geçmiş randevular
+ * - Sadece son window saat içindekiler (eskileri karıştırmamak için)
+ * Not: 16:30'da 45dklık randevu -> end_at = 17:15, 17:45'te no_show olur
+ */
+async function markNoShows() {
+    try {
+        // Ayarlardan no-show sürelerini çek
         const [settingsRows] = await pool.execute(
             `SELECT settings_json FROM app_settings LIMIT 1`
         );
 
-        let targetStatus = 'no_show';
-        let graceMinutes = 30;
+        let noShowGraceMinutes = 30;
+        let noShowWindowHours = 24;
 
         if (settingsRows.length > 0) {
             let settings = settingsRows[0].settings_json;
@@ -133,39 +143,28 @@ async function autoMarkAppointments() {
             } else if (typeof settings !== 'object' || settings === null) {
                 settings = {};
             }
-            const rawStatus = settings.auto_no_show_status ?? 'no_show';
-            const allowed = ['confirmed', 'completed', 'cancelled', 'no_show', 'none'];
-            targetStatus = allowed.includes(rawStatus) ? rawStatus : 'no_show';
-            graceMinutes = settings.auto_mark_grace_minutes ?? 30;
+            noShowGraceMinutes = settings.no_show_grace_minutes ?? 30;
+            noShowWindowHours = settings.no_show_window_hours ?? 24;
         }
 
-        // 'none' sentinel: hiçbir şey yapma
-        if (targetStatus === 'none') {
-            console.log("[SCHEDULER] Otomatik işaretleme devre dışı (status=none)");
-            return;
-        }
-
-        // 'confirmed' hedef olarak anlamsız (zaten WHERE confirmed) — yine de teknik olarak no-op olur
-        console.log(`[SCHEDULER] Otomatik işaretleme: ${graceMinutes} dk grace, hedef: ${targetStatus}`);
-
-        // cancelled_by ve cancel_reason sadece cancelled/no_show için set edilir
-        const setSystemFields = (targetStatus === 'cancelled' || targetStatus === 'no_show');
+        console.log(`[SCHEDULER] No-show kontrolü: ${noShowGraceMinutes} dk grace, ${noShowWindowHours} saat pencere`);
 
         const [result] = await pool.execute(`
             UPDATE appointments
-            SET status = ?,
-                cancelled_by = ${setSystemFields ? "'system'" : 'cancelled_by'},
-                cancel_reason = ${setSystemFields ? "'Otomatik işaretleme'" : 'cancel_reason'}
+            SET status = 'no_show',
+                cancelled_by = 'system',
+                cancel_reason = 'Sistem tarafından gelmedi olarak işaretlendi'
             WHERE status = 'confirmed'
               AND end_at < DATE_SUB(NOW(), INTERVAL ? MINUTE)
-        `, [targetStatus, graceMinutes]);
+              AND end_at > DATE_SUB(NOW(), INTERVAL ? HOUR)
+        `, [noShowGraceMinutes, noShowWindowHours]);
 
         if (result.affectedRows > 0) {
-            console.log(`[SCHEDULER] ${result.affectedRows} randevu '${targetStatus}' olarak işaretlendi`);
+            console.log(`[SCHEDULER] ${result.affectedRows} randevu 'no_show' olarak işaretlendi`);
         }
 
     } catch (err) {
-        console.error("[SCHEDULER] autoMarkAppointments hata:", err.message);
+        console.error("[SCHEDULER] markNoShows hata:", err.message);
     }
 }
 
@@ -197,10 +196,7 @@ async function sendReminders() {
         }
 
         // Hatırlatma süresine göre randevuları bul
-        const windowStart = t.toISODateTime(t.now().add({ hours: reminderHours }));
-        const windowEnd = t.toISODateTime(t.now().add({ hours: reminderHours + 1 }));
         console.log(`[SCHEDULER] Hatırlatma kontrolü: ${reminderHours} saat öncesi`);
-        console.log(`[SCHEDULER] Hatırlatma penceresi: ${windowStart} — ${windowEnd}`);
         const [rows] = await pool.execute(`
             SELECT a.id, a.start_at, c.phone, c.display_name
             FROM appointments a
@@ -210,7 +206,7 @@ async function sendReminders() {
         `, [reminderHours, reminderHours]);
 
         if (rows.length === 0) {
-            console.log(`[SCHEDULER] Bu pencere içinde randevu BULUNMADI: ${windowStart} — ${windowEnd}`);
+            console.log("[SCHEDULER] Hatırlatılacak randevu yok");
             return;
         }
 
@@ -251,7 +247,6 @@ async function sendReminders() {
                     console.log(`[SCHEDULER] Randevu #${appt.id} hatırlatma ayarı kapalı, atlanıyor`);
                 } else {
                     console.log(`[SCHEDULER] Hatırlatma gönderildi: Randevu #${appt.id}`);
-                    console.log(`[SCHEDULER] sendNotification sonucu (randevu #${appt.id}):`, JSON.stringify(result));
                 }
             } catch (err) {
                 console.error(`[SCHEDULER] Hatırlatma hatası (randevu ${appt.id}):`, err.message);
@@ -265,8 +260,5 @@ async function sendReminders() {
 
 
 module.exports = {
-    runJobs,
-    autoMarkAppointments,
-    sendReminders,
-    isBusinessOpen
+    runJobs
 };

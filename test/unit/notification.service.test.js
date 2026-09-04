@@ -147,16 +147,16 @@ describe('createOtpRecord()', () => {
       ttlSeconds: 120,
     });
 
-    // expires_at backend'te Temporal ile hesaplanır, INSERT'e parametre olarak geçer
     const call = pool.execute.mock.calls[0];
-    expect(call[0]).toContain('INSERT INTO otp_codes');
-    // expires_at, INSERT'in son parametresi olmalı (4. index)
-    expect(call[1]).toHaveLength(5);
-    expect(typeof call[1][4]).toBe('string');
+    expect(call[0]).toContain('DATE_ADD(NOW(), INTERVAL ? SECOND)');
+    expect(call[1]).toContain(120);
   });
 
-  it('falls back to 60s when ttlSeconds not provided', async () => {
-    pool.execute.mockResolvedValueOnce([{ insertId: 1 }]);
+  it('uses settings TTL when ttlSeconds not provided', async () => {
+    // Mock settings response
+    pool.execute
+      .mockResolvedValueOnce([[{ settings_json: JSON.stringify({ otp_ttl_seconds: 90 }) }]])
+      .mockResolvedValueOnce([{ insertId: 1 }]);
 
     await notificationService.createOtpRecord({
       user_type: 'customer',
@@ -165,9 +165,8 @@ describe('createOtpRecord()', () => {
       code: '123456',
     });
 
-    // Sadece bir INSERT çağrılmalı, settings sorgusu yok
-    expect(pool.execute).toHaveBeenCalledTimes(1);
-    expect(pool.execute.mock.calls[0][0]).toContain('INSERT INTO otp_codes');
+    // Should have called settings query first
+    expect(pool.execute.mock.calls[0][0]).toContain('app_settings');
   });
 });
 
