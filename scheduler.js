@@ -26,6 +26,8 @@ async function runJobs() {
 
     try {
         console.log("[SCHEDULER] İşlemler başladı...");
+        console.log(`[SCHEDULER] Sunucu saati: ${new Date().toISOString()}`);
+        console.log(`[SCHEDULER] Temporal now: ${t.toISODateTime(t.now())}`);
 
         // 1. İşletme saatleri kontrolü
         const isOpen = await isBusinessOpen();
@@ -82,15 +84,19 @@ async function isBusinessOpen() {
 
         // Kapalı gün kontrolü (closedDays veya closed_days)
         const closedDays = settings.closedDays || settings.closed_days || [];
-        if (closedDays.includes(day)) {
-            return false;
-        }
 
         // Çalışma saati kontrolü (start_hour/open_time ve end_hour/close_time ile uyumlu)
         const openHourStr = settings.start_hour ?? settings.open_time ?? "09:00";
         const closeHourStr = settings.end_hour ?? settings.close_time ?? "22:00";
         const openHour = parseInt(openHourStr.split(':')[0]);
         const closeHour = parseInt(closeHourStr.split(':')[0]);
+
+        console.log(`[SCHEDULER] isBusinessOpen — saat: ${hour}, gün: ${day} (1=Pzt, 7=Paz)`);
+        console.log(`[SCHEDULER] isBusinessOpen — çalışma: ${openHourStr}-${closeHourStr}, kapalı günler: ${JSON.stringify(closedDays)}`);
+
+        if (closedDays.includes(day)) {
+            return false;
+        }
 
         return hour >= openHour && hour < closeHour;
 
@@ -191,7 +197,10 @@ async function sendReminders() {
         }
 
         // Hatırlatma süresine göre randevuları bul
+        const windowStart = t.toISODateTime(t.now().add({ hours: reminderHours }));
+        const windowEnd = t.toISODateTime(t.now().add({ hours: reminderHours + 1 }));
         console.log(`[SCHEDULER] Hatırlatma kontrolü: ${reminderHours} saat öncesi`);
+        console.log(`[SCHEDULER] Hatırlatma penceresi: ${windowStart} — ${windowEnd}`);
         const [rows] = await pool.execute(`
             SELECT a.id, a.start_at, c.phone, c.display_name
             FROM appointments a
@@ -201,7 +210,7 @@ async function sendReminders() {
         `, [reminderHours, reminderHours]);
 
         if (rows.length === 0) {
-            console.log("[SCHEDULER] Hatırlatılacak randevu yok");
+            console.log(`[SCHEDULER] Bu pencere içinde randevu BULUNMADI: ${windowStart} — ${windowEnd}`);
             return;
         }
 
@@ -242,6 +251,7 @@ async function sendReminders() {
                     console.log(`[SCHEDULER] Randevu #${appt.id} hatırlatma ayarı kapalı, atlanıyor`);
                 } else {
                     console.log(`[SCHEDULER] Hatırlatma gönderildi: Randevu #${appt.id}`);
+                    console.log(`[SCHEDULER] sendNotification sonucu (randevu #${appt.id}):`, JSON.stringify(result));
                 }
             } catch (err) {
                 console.error(`[SCHEDULER] Hatırlatma hatası (randevu ${appt.id}):`, err.message);
